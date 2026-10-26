@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Work Copilot · A clearer working day</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/app.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<aside class="sidebar">
+<a class="brand" href="#today"><span class="brand-mark" aria-hidden="true">w<span>c</span></span><span>Work Copilot<small>YOUR LOCAL CONTEXT</small></span></a>
+<div class="nav-label">WORKSPACE</div>
+<nav aria-label="Main navigation">
+<a href="#today" data-nav="today"><span aria-hidden="true">◷</span> Today</a>
+<a href="#week" data-nav="week"><span aria-hidden="true">▤</span> This week</a>
+<a href="#search" data-nav="search"><span aria-hidden="true">⌕</span> Search context</a>
+<a href="#projects" data-nav="projects"><span aria-hidden="true">◇</span> Projects</a>
+<a href="#review" data-nav="review"><span aria-hidden="true">◎</span> Review queue <span id="review-count" class="count">0</span></a>
+</nav>
+<div class="nav-label project-nav-label">PROJECTS</div><nav id="project-nav" aria-label="Projects"></nav>
+<div class="sidebar-bottom"><div class="local-indicator"><span></span> On your computer</div><p>Your context stays local.<br>Your tools stay yours.</p><a href="#sources" data-nav="sources">Sources & coverage ↗</a></div>
+</aside>
+<div class="workspace">
+<header class="topbar"><span id="breadcrumb">Workspace / Today</span><div><span class="pill">LOCAL-FIRST</span><button id="refresh" class="icon-button" title="Refresh context">↻ <span>Refresh</span></button></div></header>
+<div id="notice" role="status" aria-live="polite" hidden></div>
+<main id="main" tabindex="-1"><div class="loading">Gathering your working context…</div></main>
+<footer>Work Copilot <span>·</span> Read, reconcile, review. Never send automatically.</footer>
+</div>
+<dialog id="draft-dialog" aria-labelledby="draft-title"><div id="draft-content"></div></dialog>
+</body></html>

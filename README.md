@@ -1,247 +1,142 @@
-# Work Copilot Architecture
+# Work Copilot
 
-A lightweight work chief of staff that remembers project context, catches obligations, and prepares grounded responses without becoming your primary workspace.
+**Your work context, on your laptop.** An evidence-backed attention queue, project wiki, and reply-preparation companion for Claude, Antigravity, and a small localhost dashboard.
 
-**Status: architecture proposal, not an implementation.** This document proposes a public-safe design. Product integrations, API capabilities, deployment choices, and latency targets require verification. All examples are fictional. Nothing here authorizes connecting work accounts, deploying software, or sending messages.
+This is an early **local-first proof of concept**, not an enterprise-ready service. It runs without a paid model or cloud account. It never sends messages, creates rooms, or changes Jira. The demo contains only fictional work.
 
-## Recommendation
+## Run it
 
-Keep Claude Desktop, Claude CLI, and Antigravity CLI as the places where you think, write Markdown, design, code, and invoke MCP tools. Add one small coordination service that maintains durable project memory and an attention queue. Expose the same service through MCP and authenticated HTTP. A thin visual interface—potentially an adapter in your Tower fork—shows what needs attention and lets you inspect evidence, revise drafts, and approve actions.
+Requires Python 3.11+ and an internet connection for the first dependency installation.
 
-The interface is a **glanceable companion, not a replacement workspace**. Closing it must not stop synchronization. Switching agents must not lose context. A CLI correction and a visual correction must update the same operational record.
-
-**Your brain lives in one work-context service, not in the UI, a chat history, or a folder of PDFs.** It owns project relationships, evidence-backed facts, commitments, open questions, and prior responses. MCP and HTTP are interfaces to that brain, not storage or memory themselves.
-
-Recommend an approved company always-on host using an existing PostgreSQL database when available, plus a worker and approved object storage for permitted artifacts. A local SQLite prototype is valid; neither a new managed platform nor a graph database, vector infrastructure, or agent swarm is required.
-
-## The daily experience
-
-Open a compact attention view with three sections: **Needs you**, **Waiting**, and **Recently changed**. Each card shows the project, reason for attention, ownership uncertainty, deadline, freshness, and evidence. This is also the single control center for editing relationships, resolving conflicting facts, correcting ownership, and inspecting coverage; it does not become the primary authoring workspace. Use restrained typography, generous whitespace, keyboard navigation, and text labels rather than color alone.
-
-A card might say: “Atlas release question has no reply; deployment status changed after the draft.” Expanding it reveals the conversation, current project state, draft, and what would happen on approval. Dismiss, snooze, correct, or approve without navigating a new project-management system. Snoozing changes visibility, not the underlying obligation.
-
-Ask your preferred agent: “What changed on Atlas?” or “Help me answer this room.” It retrieves the same project snapshot and queue state, then uses its existing coding and authoring capabilities. The companion presents concise context and opens authoritative tools when deeper work is needed.
-
-## System boundaries
-
-```mermaid
-flowchart TD
-    S[Symphony OBO MCP] --> I[Adapters and durable sync jobs]
-    J[Jira and Confluence] --> I
-    G[GitHub and approved notes or meetings] --> I
-    I --> E[Source revisions and evidence ledger]
-    E --> R[Extraction and deterministic reconciliation]
-    R --> D[(Canonical relational state and search)]
-    D --> A[Authenticated MCP and HTTP service]
-    A --> C[Claude Desktop and CLI or Antigravity CLI]
-    A --> U[Thin attention UI or optional Tower adapter]
-    C --> P[Versioned proposals]
-    U --> P
-    P --> V[Approval and freshness gate]
-    V --> O[Durable execution outbox]
-    O --> W[Authorized external write tools]
-    W --> I
+```sh
+git clone https://github.com/Sean-Koval/work-copilot.git
+cd work-copilot
+./run.sh
 ```
 
-The backend connects to existing source MCPs through capability-checked adapters and owns scheduling, identity, synchronization, reconciliation, policy checks, and audit history. Models extract candidates, explain evidence, and draft responses; they do not independently own truth or silently perform side effects. UI and CLI clients share API contracts rather than implementing separate policies.
+Windows PowerShell launcher: `./run.ps1` (provided but not runtime-tested). Linux/Python 3.12 is the verified runtime; your laptop OS still needs a smoke test. Open **http://127.0.0.1:8765**. Stop with Ctrl+C. Re-running keeps your demo state. Nothing is installed as a login service.
 
-| Information | Authority | Copilot responsibility |
-| --- | --- | --- |
-| Engineering issue state | Jira | Mirror references and detect obligations or conflicts |
-| Team specifications and decisions | Designated Confluence documents | Retrieve cited revisions; propose changes |
-| Code and reviewed changes | GitHub repository | Link commits, pull requests, checks, and handoffs |
-| Personal working notes | Approved Obsidian vault | Read selected notes; export clearly labeled views |
-| Conversation and meeting evidence | Original permitted sources | Preserve provenance and reconcile later developments |
-| Attention, candidate obligations, approvals | Coordination service | Maintain one canonical operational state |
+By default, demo data lives in `~/.local/share/work-copilot-demo` (or `$XDG_DATA_HOME/work-copilot-demo`), **not in this repository**. Real local state uses the separate `work-copilot` directory. Use `--data-dir` **before** the command to choose a different private location; do not choose a public checkout or sync a live SQLite database.
 
-A personal note cannot silently override a Jira status. A conversation may provide newer evidence but should create a conflict or proposed update, not rewrite the authoritative system. Obsidian exports are projections; edits intended as corrections must pass through the service with revision checks. Avoid two independently editable task lists.
+```sh
+# Real, initially empty workspace; explicitly select approved notes.
+./run.sh serve --vault /absolute/path/to/work-vault
 
-## Capture without pretending to see everything
-
-The assumed Symphony OBO integration can read, send, and create rooms at the user's permissions. That assumption comes from the proposed use case, not an independently verified capability contract. OBO permissions describe what a credential can do; they are **not blanket authorization to send or create rooms**.
-
-Before implementation, verify room discovery, membership visibility, history access, pagination, message identifiers, revision timestamps, edit/delete behavior, rate limits, and send-result semantics. MCP is a tool interface, not inherently a push event bus. Confirm whether scheduled polling is permitted and supported; use approved notifications or webhooks only if actually available. Do not assume bot Datafeed coverage applies to an OBO identity.
-
-Connector-specific starting points are [Jira Cloud webhooks](https://developer.atlassian.com/cloud/jira/platform/webhooks/) and [Confluence Cloud CQL search](https://developer.atlassian.com/cloud/confluence/advanced-searching-using-cql/). Cloud versus Data Center deployment is unresolved; these references do not establish availability in a particular installation. [Obsidian properties](https://obsidian.md/help/properties) can carry stable project IDs in selected notes. For a Google Meet adapter, [artifact retrieval](https://developers.google.com/workspace/meet/api/guides/artifacts) covers generated meeting artifacts; their existence, user access, and permission to process them must be established, not assumed.
-
-For every adapter:
-
-1. Define an explicit scope: allowed rooms, projects, repositories, note folders, and meeting sources. Discover additional rooms only within approved permissions and selection rules.
-2. Backfill a bounded history window, following all pages. Record coverage start/end, gaps, and unsupported capabilities.
-3. Poll incrementally using provider cursors where reliable, with an overlap window to catch late events. Deduplicate by source identity and revision, not prose similarity alone.
-4. Atomically commit ingested records and the corresponding checkpoint. A crash before commit must replay safely; a checkpoint must never advance past uncommitted records.
-5. Reconcile edits, deletions, timestamp changes, and out-of-order events. If deletion detection is unavailable, mark that limitation and perform supported periodic rechecks rather than implying completeness.
-6. On detected access loss, immediately stop ingestion and retrieval, invalidate dependent drafts, and apply approved retention/deletion policy to cached content and derived material. Revalidate access before serving restricted content or executing actions; fail closed when permission cannot be established. Record ACL check time and detection limitations rather than claiming instantaneous knowledge of upstream revocation.
-
-Process permitted room summaries even when the user is not tagged. “We still need someone to confirm the release checklist” is an obligation candidate, not proof that the user owns it. Room activity is not automatically personal responsibility.
-
-Every view reports **last successful sync and coverage**, not merely when its summary was generated. “No outstanding requests found” must be qualified by the sources and period examined. Proposed pilot targets might be a five-minute poll interval, a ten-minute observation-to-queue p95, and a cached context response within two seconds. These are SLOs to measure, not guarantees; rate limits, outages, approval requirements, and model latency may require different targets.
-
-## Where the brain lives
-
-Run one coordination service on an approved always-on company host, with existing PostgreSQL for transactional state and approved object/blob storage for permitted transcripts and artifact versions. This keeps capture available when a laptop sleeps and gives every client the same durable context. Choose existing supported infrastructure rather than requiring another managed platform. The host, models, encryption, retention, backup, and network access need organizational approval.
-
-A local single-user pilot can use SQLite with full-text search on persistent disk, one service writer, and tested backups. Do not share a live database by copying it through a sync folder or letting clients write independently. A sleeping laptop cannot provide continuous capture; show the resulting coverage gap and backfill on resume. Move the same logical model to the approved host if continuity is needed.
-
-Separate four storage layers:
-
-1. **Upstream authority:** Jira, Confluence, repositories, conversations, and designated notes retain their authoritative records.
-2. **Source ledger:** retain stable locators, revisions, hashes, access scope, and minimal permitted snapshots. Version evidence rather than overwriting history, subject to deletion and retention policy.
-3. **Canonical relational brain:** entities, relationships, facts, decisions, obligations, approvals, and execution outcomes are transactional records with provenance.
-4. **Rebuildable projections:** project briefs, full-text indexes, optional semantic recall, and UI cards derive from those records. They are never a second authority.
-
-An illustrative private object layout is `sources/<provider>/<object-id>/<revision>/` and `projects/<project-id>/artifacts/<artifact-id>/<version>/`. These are storage locations, not the ontology: database links connect an artifact to multiple relevant entities without copying it. Source payloads, credentials, and databases must never enter the public repository.
-
-Obsidian remains a human-authored personal knowledge space. Only explicitly selected folders participate as inputs or projections; unrelated local notes do not automatically synchronize to company infrastructure. A local cache is optional, scoped, and revocable.
-
-## A small project ontology
-
-Use stable internal IDs for **Project, Workstream, Person, Conversation, SourceObject, Commitment, Decision, Fact, and Artifact**. A workstream groups a project's ongoing track of work; a commitment represents an obligation rather than every mentioned task. Typed relationships express ownership, participation, dependencies, support, and supersession.
-
-External provider IDs identify objects within a provider and tenant/workspace/account namespace; use that full identity in uniqueness constraints, checkpoints, and deduplication. Contextual aliases help find them. A room title, project nickname, or person's display name is not a globally unique identity. Map a project explicitly to Jira keys, repository IDs, rooms, documents, and selected note paths. Ambiguous mappings require review. Entity merges preserve the original IDs and evidence, are recorded, and can be reversed.
-
-Facts carry the assertion, subject, scope, source revision, observation time, effective validity interval when known, confidence, and verified/conflicting/superseded status. Distinguish source-stated facts, model-inferred candidates, and user-confirmed state. New evidence can update validity without erasing history; forgetting, deletion, and access revocation propagate to summaries, indexes, caches, and affected drafts under policy.
-
-The project brief is a rebuildable view of purpose, current phase, decisions, open issues, obligations, and contradictions. Important assertions retain evidence and freshness. Summaries cannot recursively confirm themselves. Weeks of continuity come from reconciled records, not a growing chat transcript.
-
-Reconciliation uses stable keys and explicit transitions. Repeated meeting summaries and a Jira issue can support one obligation without producing three tasks. Link their evidence while preserving source distinctions. A later reply can satisfy a request; a subsequent clarification can reopen it. A changed deadline retains its previous value and supporting revision. Uncertain ownership remains uncertain until resolved.
-
-```mermaid
-stateDiagram-v2
-    [*] --> Candidate: evidence observed
-    Candidate --> Open: confirmed obligation
-    Candidate --> Dismissed: irrelevant or duplicate
-    Open --> Waiting: dependency identified
-    Waiting --> Open: dependency changes
-    Open --> Resolved: satisfaction evidence
-    Waiting --> Resolved: satisfaction evidence
-    Resolved --> Open: new contrary evidence
-    Open --> Superseded: replacement confirmed
-    Candidate --> Review: ownership or evidence conflict
-    Review --> Open: clarification
-    Review --> Dismissed: rejected
+# Explicit custom private storage location.
+./run.sh --data-dir /private/work-copilot serve --vault /absolute/path/to/work-vault
 ```
 
-An obligation's lifecycle is separate from a message draft's lifecycle. Sending an acknowledgement does not resolve the underlying work. A resolved issue does not prove every related question was answered.
+The selected folder is recursive: choose a dedicated **work-only folder**, not your whole personal vault. The app reads Markdown files, not arbitrary attachments. It does not change handwritten notes. Dropping a Markdown transcript into this folder or pasting one through **Capture note** uses the same pipeline. Unmapped notes appear for review rather than being guessed into a project.
 
-## Grounded replies that sound useful
+## What works now
 
-The service compiles context rather than asking each client to reconstruct everything:
+- **Today** keeps a suggested daily priority snapshot anchored; newly urgent items appear separately. Suggestions are not promises. **This Week** separates explicit commitments from other work.
+- **Attention and waiting** track distinct canonical question intents, evidence, candidate ownership, and pending/sent/answered state. Recording “sent” is a manual record, not a send action.
+- **Projects** combine multiple rooms and commercial, engineering, and product workstreams. A shared room/source can belong to multiple projects.
+- **Reply preparation** generates clearly labeled offline templates and inspectable source packets. Review/edit/copy locally; no LLM is called. New evidence invalidates old drafts. A merged PR is never treated as proof of deployment.
+- **Selected vault capture** detects content edits and deletions, retains source revisions, and preserves daily originals. Structured metadata is optional; this is not general-purpose AI extraction.
+- **Readable Markdown wiki** lives in `Work Copilot Generated/` within your selected vault: project projections, source passages/citations, and a review bucket. These generated files are not a second editable source of truth. Use original notes or revision-checked reviews to correct knowledge.
+- **Search** uses SQLite FTS5 ranked lexical retrieval with project/workstream/provider/time filters and source-linked snippets. It is not semantic search; no embedding model runs.
+- **Follow-ups** are structured local records with a follow-up time separate from a promised deadline. Ask your agent to track a waiting item, then inspect the same record in the UI.
+- **One shared context store** is exposed through local HTTP and the official MCP SDK over stdio. Agents remain your writing/coding workspace.
+- **OAuth remote MCP** has explicit endpoint/tool configuration and opt-in authorization; see setup below. No account is connected automatically.
 
-1. Resolve the requesting identity, permissions, project, and intent.
-2. Fetch fresh authoritative state, canonical open questions, prior outgoing answers, relevant commitments, and decisions.
-3. Assemble a bounded evidence packet with source revisions, freshness, conflicts, and explicit gaps. Use exact identifiers and full-text retrieval first; expand only when needed.
-4. Let the chosen client reason, code, design, or draft in its existing workspace.
-5. Accept structured proposed changes and confirmed tool receipts back into the service. A client's statement that work is done is not a substitute for source evidence.
+A missing meeting transcript is a **waiting-for** item and a draft request—not evidence we have the transcript. Decisions, risks, and awareness remain visible as source context even without an action. Matching explicit intent keys deduplicates repeated transcript/summary actions; arbitrary prose similarity does not.
 
-Keep one canonical obligation per distinct request or intent, not one per entire conversation; a room or thread may contain several independent requests. Each record links the original request, clarification questions already asked, answers received or sent, and unresolved intent using source message references. Before suggesting another question or reply, check that record and the current conversation. This reduces repeated questions and unnoticed unanswered requests within observed coverage without assuming that every read message needs a response. There is no promise of completeness outside declared coverage.
+## First real-work setup
 
-Choose a response mode before writing:
+1. Start an empty workspace with `./run.sh --timezone America/New_York serve --vault /absolute/path/to/work-vault` (choose your IANA timezone; default UTC).
+2. Use **Create project** in the dashboard to set a stable ID, display name, aliases, and multiple room IDs. A room can belong to more than one project. The local MCP `create_project` tool does the same.
+3. Paste/drop a note or transcript; select its project/workstream explicitly, or review its proposed mapping. Agents can call `capture_note` with a project ID—no handwritten JSON required.
+4. Configure approved OAuth MCP access separately; no connector is granted automatically.
+5. Run offline diagnostics: `./run.sh doctor --vault /absolute/path/to/work-vault --config /private/symphony.json`. It checks local paths/database, project setup, and known sync/auth state; it does not contact or authorize a server.
 
-| Mode | Purpose | Constraint |
-| --- | --- | --- |
-| Acknowledge | Confirm receipt of a support request | No invented investigation, owner, deadline, or promise |
-| Status | Explain established progress | Cite current evidence; distinguish planned from completed |
-| Clarify | Resolve a material ambiguity | Ask the smallest question needed |
-| Defer | Explain that a reliable answer is not yet available | State the gap without fabricating an ETA |
+**How it knows what you did:** this MVP accepts an explicit session handoff as a note, structured obligation update, or normalized import. Include commit/test/source references. A client saying “done” is not evidence of deployment. It does not scrape Claude/Antigravity private trace directories or claim support for their proprietary activity-log formats.
 
-For example: “Thanks for flagging this. Which environment shows the error?” is safer than “I'm investigating and will fix it today” when neither investigation nor timing is established. Even acknowledgements remain drafts unless separately authorized.
+## Give notes explicit context
 
-Keep an internal evidence ledger separate from outgoing prose. Record which source supports each material claim, contradictions checked, missing facts, and the snapshot revision used. The user can inspect it; recipients receive only appropriate content and citations they are authorized to see. Never include inaccessible source excerpts just because the assistant can retrieve them.
+Supported frontmatter is intentionally small: each field is a single-line JSON value, not full YAML.
 
-Learn tone from user-approved examples and explicit preferences, not private messages indiscriminately. Style can change phrasing; it cannot create facts or commitments. Version skills and runbooks as reusable procedures with owners and review dates. Store project facts in evidence-backed memory, not in skills that silently become outdated.
-
-## Approval and execution safety
-
-Read-only capture, inference, and draft preparation are distinct from writes. Sending a message, creating a room, modifying Jira, editing a shared document, or publishing code requires the applicable approval policy. The initial pilot enables no external writes. Reviewing or dismissing an attention card is not approval to execute.
-
-An approval binds an exact proposal revision, content hash, destination identity, action type, relevant attachments, and expiry. For a new room it also binds membership and visibility. Editing text, changing recipients, or acquiring material new evidence invalidates approval. Immediately before execution, recheck authorization, source freshness, destination permissions, and duplicate intent.
-
-Deduplicate against the canonical conversation intent and prior outgoing answers. Persist the intent and idempotency key before sending. Use provider idempotency where supported. A timeout after submission is **unknown outcome**, not failure: reconcile via returned IDs, provider lookup, or operator review before retrying. Never blindly resend a message. Record the observed result separately from the attempted action; an API acceptance is not always delivery confirmation.
-
-Treat all retrieved text—including messages, documents, code comments, and meeting transcripts—as untrusted data. Embedded instructions cannot change system policy, request credentials, authorize writes, or expand access. Keep credentials out of model context and logs. Enforce ACLs during ingestion, retrieval, drafting, preview, and execution; derived summaries must retain source sensitivity. Revocation must propagate to indexes, caches, exports, and drafts under the retention policy.
-
-Use an approved runtime and model for the data classification involved. Do not assume that an individual's technical access permits sending work content to any model provider. Log policy decisions and action metadata with minimized sensitive payloads. Protect the local database, backups, and service endpoint; bind locally by default unless remote access is explicitly approved.
-
-## A small buildable shape
-
-The following is a logical layout, not files or commands already installed:
-
-```text
-service/
-  adapters/         # Capability contracts and source normalization
-  sync/             # Scheduling, checkpoints, retries, coverage
-  reconcile/        # Identity mapping and state transitions
-  retrieval/        # ACL-filtered project context and FTS
-  proposals/        # Draft revisions and evidence ledger
-  policy/           # Approval, access, freshness, execution gates
-  api/              # Shared MCP and HTTP contracts
-ui/                 # Standalone view or optional Tower adapter
-skills/             # Versioned procedures, not project facts
-fixtures/           # Synthetic sources and replay expectations
-private-runtime/    # Database, cache, outbox; never committed
+```markdown
+---
+project_ids: ["atlas"]
+workstream: "engineering"
+obligations: [{"intent_key":"release-checklist", "title":"Confirm release checklist", "project_id":"atlas", "owner":null, "status":"candidate"}]
+---
+# Release meeting
+Decision: run the staging check before considering release.
+Risk: production rollout has not been verified.
 ```
 
-Minimum logical records:
+Stable project IDs and explicit intent keys matter; a display name is not an identity. Unknown ownership remains a candidate. Ordinary notes without this metadata are still captured with line-numbered source context and a mapping-review item. Exact whole-phrase project names, IDs, and configured aliases (including wikilinks) propose possible projects; these are narrow heuristic suggestions, never confirmed assignment or inferred ownership. Shared aliases stay ambiguous until reviewed. Rename/move currently behaves as delete plus new source; editing a note in place preserves its source ID.
 
-| Record | Essential fields |
-| --- | --- |
-| `project` / `source_binding` | Stable ID, aliases, source IDs, approved scope |
-| `source_revision` | Provider/tenant-or-account/object/revision keys, timestamps, hash, locator, ACL, tombstone |
-| `sync_checkpoint` | Scope, cursor, covered interval, last success, gap/error |
-| `evidence` / `claim` | Source references, assertion, confidence, validity, supersession |
-| `obligation` | Project, owner certainty, state, due-date evidence, revision |
-| `proposal` / `approval` | Action, destination, exact content hash, evidence snapshot, expiry |
-| `execution` | Idempotency key, attempt state, provider receipt, reconciliation result |
-| `artifact` / `handoff` | Version, path/hash, project, source snapshot, session summary |
+## Connect your Symphony OAuth MCP server
 
-Use foreign keys, uniqueness constraints, transactions, migration versions, and optimistic concurrency. Serialize conflicting updates through the service. Preserve audit transitions while applying retention requirements to sensitive payloads. Test backup and restore rather than assuming a database file alone is sufficient.
+The connector talks **MCP over HTTP with OAuth**, not Symphony bot APIs. The specific company endpoint, OAuth registration policy, scopes, read tools, response schema, and permitted rooms must be supplied by your administrator or server documentation. We have **not tested against your company server** and do not invent Symphony tool names.
 
-Conceptual MCP operations include `project_context`, `attention_list`, `obligation_correct`, and `proposal_create`. A separate `proposal_approve` boundary requires an authenticated, authorized human approver; model/tool credentials cannot self-approve or manufacture approval. Record the approver identity separately from the execution identity, and verify both approval authority and execution permissions. Read, proposal, approval, and execution scopes must be separate. Equivalent HTTP routes serve the UI; neither client directly edits the database.
+Read [Symphony MCP setup](docs/SYMPHONY_MCP.md) for the exact configuration, credential storage choice, authorization flow, discovery, and normalization contract. User authorization is only initiated when you explicitly run:
 
-A coding-session handoff records project ID, repository and branch, relevant commit, changed files, tests actually run, unresolved questions, artifacts, and next proposed action. Store concise evidence-linked summaries, not hidden reasoning. The next CLI session retrieves this handoff and verifies repository state before acting.
+```sh
+./run.sh connect --config /private/symphony.json --authorize
+./run.sh collect --config /private/symphony.json
+./run.sh serve --vault /absolute/path/to/work-vault --connector-config /private/symphony.json
+```
 
-Artifacts have immutable versions and explicit draft/approved/published status. Markdown, designs, and generated HTML remain in the existing workflow. Preview HTML in an isolated sandbox with scripts and network access disabled by default, a restrictive content policy, and no production credentials. Opening a preview must never execute tool calls or publish it.
+A configured collector runs while the service is open, without asking Claude to check each time. Closing the dashboard does not stop the running service; closing the service or sleeping the laptop does. Coverage/error/reconnect status is visible. OAuth access is not authorization to send; the collector is read-only and this app has no external send operation.
 
-## Fictional example with Project Atlas
+Jira, GitHub, Confluence, and meeting-provider **vendor-specific adapters are not implemented**. Their fictional demo evidence proves reconciliation behavior, not live connectivity. Normalized JSON import is immediately usable for approved exports or adapters; see [connector contract](docs/CONNECTORS.md).
 
-An approved Atlas room contains an untagged summary: “The release checklist still needs confirmation.” Capture creates a candidate linked to that source revision; ownership is unknown. A Jira issue already tracks the checklist, so reconciliation attaches evidence rather than opening a duplicate task.
+```sh
+./run.sh import /private/approved-source-export.json
+./run.sh capture /absolute/path/to/work-vault
+./run.sh export /absolute/path/to/work-vault
+```
 
-Later, the issue shows a completed checklist while a room participant asks whether the release is live. The service distinguishes checklist completion from deployment. The attention card offers a clarification draft, not an invented release confirmation. An agent in Claude Desktop requests Atlas context, reviews deployment evidence, and prepares a factual status reply.
+## Use from Claude / Antigravity
 
-The user edits and approves revision 3 for the exact room. Before send, a new message says the deployment was rolled back. Freshness checks invalidate the approval and surface the change. A revised draft requires new approval. Once sent and observed, the reply obligation can resolve; any rollback investigation remains open. A later CLI session receives that same state, while an Obsidian projection shows the linked decision history.
+After installation, configure an MCP stdio server in the client's supported configuration. Use **absolute paths** and the same data directory as the dashboard:
 
-## Notifications and corrections
+```json
+{
+  "mcpServers": {
+    "work-copilot": {
+      "command": "/absolute/path/to/work-copilot/.venv/bin/python",
+      "args": ["-m", "work_copilot", "--data-dir", "/private/work-copilot", "mcp"]
+    }
+  }
+}
+```
 
-Urgency and confidence are independent. High-impact uncertain evidence deserves a review card, not a confident escalation. Notify promptly for an explicitly assigned urgent request or invalidated imminent action; batch routine changes into a digest. Group duplicates, respect quiet hours, and avoid repeated alerts without a material change.
+On Windows, use `.venv/Scripts/python.exe`. Tools provide attention, project context, search, and reply evidence. Explicit structured tools can track obligations and revision-check local corrections; `capture_note` writes only when the server has an explicitly selected `WORK_COPILOT_VAULT` environment variable. Agent credentials cannot approve or send an external action. For example, ask your client: “Track that I am waiting on Alex for the Atlas transcript; follow up tomorrow.” The client must translate that into a stable project ID and an explicit timestamp with timezone; the service validates and persists fields, not natural-language inference. A follow-up reminder is not a promise to Alex, and no request is sent. Client-specific installation UI varies. Approve your company's permitted model/data policy before giving work content to any agent.
 
-A correction can reject an owner, merge duplicate candidates, fix a project mapping, or mark a claim wrong. Preserve provenance and the correction event, recompute affected views, and invalidate dependent drafts. Do not silently rewrite source history or train on corrections outside approved policy.
+## Optional session activity receipts and lessons
 
-## Staged validation
+[Local hooks/intake](docs/HOOKS.md) accepts small structured session outcomes with repository→project mapping, commit/PR/Jira links, and optional procedure-step references. It has a durable bounded queue, replay deduplication, restart recovery, visible error receipts, and a recursion guard. Nothing is installed into Claude or Antigravity; their lifecycle hook APIs have **not** been verified. No trace directories are scanned.
 
-1. **Capability review:** approve runtime, model, source scope, retention, and connector contracts. Document unsupported coverage before claiming monitoring.
-2. **Synthetic pilot:** replay fictional rooms, Jira issues, notes, and meetings. No production credentials or writes. Verify deterministic replay and recovery.
-3. **Small read-only pilot:** with separate approval, select a few sources and a bounded backfill. Compare the queue against manual review; measure missed obligations, duplicates, false ownership, freshness, and retrieval latency.
-4. **Draft-only workflow:** evaluate groundedness and time to a useful response using approved examples. All sending remains manual.
-5. **Approval-bound writes:** enable one action type only after stale-draft, permission, and unknown-outcome tests pass. Broaden scope deliberately, not through agent initiative.
+Outcomes remain **claims**, not verified completion or evidence that a stakeholder was informed. An activity receipt asks for source verification; it does not silently mark deployment, send a reply, or advance a procedure. Correction learnings enter project context as **proposed** review candidates. A full accepted-learning/supersession lifecycle and automatic skill updates are deferred.
 
-Required fixtures cover untagged actions; duplicate summary/Jira references; later replies that close and reopen obligations; uncertain owners; inaccessible and unsupported sources; edits, deletions, status/timestamp changes; overlapping pages; crash-before-checkpoint replay; conflicting client revisions; access revocation; injected instructions; stale drafts; approval for the wrong revision or destination; duplicate sends; and ambiguous send outcomes.
+MCP defaults are compact: paged attention, bounded evidence snippets, counts/cursors, and a 24,000-character response budget. Use `get_source` for specific passages (up to 8,000 characters per call), instead of loading an entire project history.
 
-Acceptance requires replay without duplicate obligations or actions, visible coverage gaps, evidence for material claims, no unauthorized writes, and correct approval invalidation. Agree numerical quality thresholds after establishing a baseline. A pilot is not production-ready merely because its demo looks convincing.
+## Safety and limits
 
-## Alternatives and decisions still open
+- HTTP binds only to loopback. Host/origin checks, a session mutation token, and a strict content policy protect against browser cross-site writes. This is a single-user local app, **not remote authentication**; other software running as you can access local state.
+- Source text is untrusted data, rendered as text rather than executable HTML. Selected-vault symlinks are excluded. Generated artifacts are never executed.
+- SQLite and Markdown contain work content. The app does **not** encrypt the database or implement enterprise retention, backups, or live upstream ACL enforcement. Use company-approved storage and OS disk encryption. Remote access revocation cannot be guaranteed instantaneously; gaps and unsupported semantics must be reviewed.
+- Raw OAuth messages/transcripts are collected as source context; the prototype does **not** automatically extract all replies owed or tasks from that prose. Obligations come from explicitly structured source fields, reviewed intake, or your chosen client agent reading context and calling `track_obligation` with evidence IDs. The agent can draft using the same packets, but no always-on LLM runs in this app. The prototype does not resolve aliases semantically, prove source completeness, or automatically reconcile arbitrary contradictory prose. Explicit candidates and review are deliberate.
+- No automatic OS permissions, startup agents, cloud deployment, paid model, or GitHub Actions workflow. No license is selected yet; public source availability alone does not grant an open-source license.
 
-| Option | Strength | Trade-off |
-| --- | --- | --- |
-| CLI plus Markdown only | Smallest surface area | Easy to miss attention items; weaker scanning |
-| Shared backend plus thin UI | Durable context across agents; clear queue | One small service to operate; recommended |
-| Full new workspace | Extensive integrated interaction | Duplicates existing tools and changes habits |
-| Independent agents with separate memory | Fast experiments | Conflicting truth, approvals, and duplicated work |
+Direct runtime dependencies, including the OAuth MCP SDK, are pinned; `constraints.txt` records the tested dependency set. Launchers install on first run, when the dependency manifest changes, or when required imports are absent; unchanged normal launches do not run pip or require network. Review and test dependency updates deliberately.
 
-Mem0 is optional derived semantic recall, not the operational brain. Its documented memory operations and entity-aware ranking can help retrieval, but do not replace this project's ontology, temporal facts, approval lifecycle, or source ACL propagation. Query exact pending questions and commitments in SQL, not only top-k similarity results. Add recall infrastructure only if held-out retrieval tests demonstrate a need, and pin the evaluated version. See [Mem0 Platform and OSS](https://docs.mem0.ai/platform/platform-vs-oss).
+The original longer-term proposal is preserved in [Architecture](docs/ARCHITECTURE.md); its hosted deployment and external-action design are **future proposals**, not current features.
 
-Self-hosting does not mean all data stays local: Mem0 OSS documents hosted model defaults and configurable extraction, embedding, and reranking providers. Verify every processing route and implement source permissions explicitly before use. See [OSS configuration](https://docs.mem0.ai/open-source/configuration).
+## Development
 
-The recommended approach is revisable. Decide the approved runtime and model, actual Symphony OBO API scope, polling constraints, retention and ACL requirements, source ownership rules, and whether Tower offers an appropriate integration point. Validate any fork-specific API, identity, visibility, and freshness contract before integration. No Tower internals or integration capability are assumed. A standalone local attention view is a valid first adapter.
+```sh
+python3 -m venv .venv
+.venv/bin/python -m pip install -c constraints.txt -e '.[test]'
+.venv/bin/python -m pytest -q
+```
 
-**Next decision:** agree on the service boundary and one synthetic end-to-end pilot. Implementation, account connection, deployment, and external actions require separate authorization.
+Tests cover store replay/restart, source revisions, many-to-many mapping, stale drafts, review conflicts, selected vault preservation/symlinks, local HTTP boundaries, and actual MCP client/server initialization and tool calls. OAuth protocol tests use a local fake server; they do not certify a deployment-specific Symphony server.
+
+See [Validation and local agent smoke test](docs/VALIDATION.md) for what was actually exercised and what remains unverified.
