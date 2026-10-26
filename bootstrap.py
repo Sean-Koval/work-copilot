@@ -5,6 +5,9 @@ from pathlib import Path
 import subprocess
 import sys
 
+if sys.version_info < (3,11):
+    raise SystemExit('Error: Work Copilot needs Python 3.11 or newer. Install/select a supported Python, then rerun the launcher.')
+
 root=Path(__file__).parent
 fingerprint=hashlib.sha256((root/'pyproject.toml').read_bytes()+(root/'constraints.txt').read_bytes()).hexdigest()
 marker=Path(sys.prefix)/'.work-copilot-installed'

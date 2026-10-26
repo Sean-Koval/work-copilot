@@ -234,7 +234,7 @@ def test_refresh_needed_survives_restart_without_connector_mutation(tmp_path):
 def test_empty_first_run_does_not_freeze_empty_daily_plan(tmp_path):
     store=Store(tmp_path/'s.db',now=lambda:datetime(2026,10,26,tzinfo=timezone.utc))
     assert store.snapshot()['today']['priorities']==[]
-    first=store.track_obligation({'intent_key':'first','title':'My first follow-up','owner':'me','follow_up_at':'2026-10-26'})
+    first=store.track_obligation({'intent_key':'first','title':'My first follow-up','owner':'me','status':'open','follow_up_at':'2026-10-26'})
     assert store.snapshot()['today']['priorities']==[first['id']]
     second=store.track_obligation({'intent_key':'second','title':'New urgency','owner':'me','follow_up_at':'2026-10-26'})
     today=store.snapshot()['today']; assert today['priorities']==[first['id']]; assert second['id'] in today['new_urgency']
@@ -243,3 +243,136 @@ def test_empty_first_run_does_not_freeze_empty_daily_plan(tmp_path):
 def test_unknown_ownership_is_review_not_personal_priority(tmp_path):
     store=Store(tmp_path/'s.db'); store.ingest([source()]); snapshot=store.snapshot()
     assert snapshot['review']; assert snapshot['today']['priorities']==[]
+
+
+def test_focus_prunes_finished_and_waiting_preserving_survivors(tmp_path):
+    store=Store(tmp_path/'s.db')
+    obs=[store.track_obligation({'intent_key':str(i),'title':str(i),'status':'open'}) for i in range(3)]
+    initial=store.snapshot()['today']; ids=initial['priorities']
+    store.review(ids[0],1,{'status':'resolved'})
+    store.review(ids[1],1,{'status':'waiting'})
+    today=store.snapshot()['today']
+    assert today['priorities']==[ids[2]]
+    assert today['revision']>initial['revision']
+    assert store.snapshot()['today']['revision']==today['revision']
+
+
+def test_explicit_priorities_are_revision_checked_and_persisted(tmp_path):
+    path=tmp_path/'s.db'; store=Store(path)
+    obs=[store.track_obligation({'intent_key':str(i),'title':str(i),'status':'open'}) for i in range(4)]
+    today=store.snapshot()['today']; selected=[obs[3]['id'],obs[0]['id']]
+    result=store.set_priorities(selected,today['revision'])
+    assert result['priorities']==selected and result['kind']=='pinned'
+    assert Store(path).snapshot()['today']['priorities']==selected
+    with pytest.raises(ConflictError): store.set_priorities([],today['revision'])
+    with pytest.raises(ValueError): store.set_priorities(selected*2,result['revision'])
+    waiting=store.track_obligation({'intent_key':'waiting','title':'Waiting'})
+    with pytest.raises(ValueError): store.set_priorities([waiting['id']],result['revision'])
+    cleared=store.set_priorities([],result['revision'])
+    assert cleared['priorities']==[] and store.snapshot()['today']['priorities']==[]
+
+
+def test_week_overdue_includes_prior_weeks_without_duplicate_lanes(tmp_path):
+    store=Store(tmp_path/'s.db',now=lambda:datetime(2026,10,28,tzinfo=timezone.utc))
+    prior=store.track_obligation({'intent_key':'prior','title':'Prior week','due_at':'2026-10-20','commitment':True})
+    recent=store.track_obligation({'intent_key':'recent','title':'Yesterday','follow_up_at':'2026-10-27'})
+    current=store.track_obligation({'intent_key':'current','title':'Today','due_at':'2026-10-28','commitment':True})
+    week=store.snapshot()['week']
+    assert {o['id'] for o in week['overdue']}=={prior['id'],recent['id']}
+    assert [o['id'] for o in week['commitments']]==[current['id']]
+    assert week['suggestions']==[] and week['backlog']==[] and week['overdue_count']==2
+
+
+def test_room_bindings_route_existing_and_future_sources_without_ownership(tmp_path):
+    store=Store(tmp_path/'s.db'); a=source(); a.update(projects=[],obligations=[]); store.ingest([a])
+    atlas=store.create_project('atlas','Atlas',rooms=[{'id':'room1','name':'Shared'}])
+    beacon=store.create_project('beacon','Beacon',rooms=[{'id':'room1','name':'Shared'}])
+    assert {p['id'] for p in store.list_sources()[0]['projects']}=={'atlas','beacon'}
+    assert len(store.project('atlas')['sources'])==1 and len(store.project('beacon')['sources'])==1
+    store.ingest([dict(a,id='future')]); assert len(store.project('beacon')['sources'])==2
+    assert store.snapshot()['obligations']==[]
+    assert store.ingest([a])['unchanged']==1
+    raw=__import__('json').loads(store.db.execute('SELECT payload FROM source_revisions WHERE id=?',(a['id'],)).fetchone()[0]); assert raw['projects']==[]
+    assert store.search('Beacon deployed',project_id='beacon')
+
+
+def test_project_config_update_conflict_removes_room_projection_and_respects_explicit(tmp_path):
+    store=Store(tmp_path/'s.db'); p=store.create_project('atlas','Atlas',rooms=[{'id':'room1','name':'Shared'}])
+    a=source(); a.update(projects=[],obligations=[]); store.ingest([a]); mapped=store.list_sources()[0]
+    updated=store.update_project('atlas',p['config_revision'],name='Atlas new',aliases=['North Star'],rooms=[])
+    assert updated['config_revision']==p['config_revision']+1
+    assert store.project('atlas')['sources']==[]
+    assert store.list_sources()[0]['projects']==[]
+    with pytest.raises(ConflictError): store.update_project('atlas',p['config_revision'],name='Stale')
+    with pytest.raises(ConflictError): store.map_source(a['id'],mapped['mapping_revision'],[])
+    store.update_project('atlas',updated['config_revision'],rooms=[{'id':'room1','name':'Shared'}])
+    explicit=source(); explicit.update(id='explicit',projects=[{'id':'beacon','name':'Beacon'}],obligations=[]); store.ingest([explicit])
+    assert {p['id'] for p in store._source('explicit')['projects']}=={'beacon'}
+    projected=store._source(a['id']); store.map_source(a['id'],projected['mapping_revision'],[])
+    assert store._source(a['id'])['projects']==[]
+
+
+def test_new_room_evidence_stales_draft_and_restart_preserves_bindings(tmp_path):
+    path=tmp_path/'s.db'; store=Store(path); store.create_project('atlas','Atlas',rooms=[{'id':'room1','name':'Shared'}])
+    ob=store.track_obligation({'intent_key':'status','title':'Status','project_id':'atlas','status':'open'}); draft=store.draft(ob['id'])
+    incoming=source(); incoming.update(projects=[],obligations=[]); store.ingest([incoming])
+    assert store.snapshot()['drafts'][0]['stale']
+    store.db.execute('DELETE FROM source_projects WHERE source_id=?',(incoming['id'],)); store.db.commit()
+    restarted=Store(path); assert incoming['id'] in [s['id'] for s in restarted.project('atlas')['sources']]
+
+
+def test_empty_plan_revision_conflicts_after_first_focus_arrives(tmp_path):
+    store=Store(tmp_path/'s.db'); observed=store.snapshot()['today']
+    ob=store.track_obligation({'intent_key':'new','title':'New focus','status':'open'})
+    with pytest.raises(ConflictError): store.set_priorities([ob['id']],observed['revision'])
+
+
+@pytest.mark.parametrize('attempt',range(20))
+def test_concurrent_legacy_config_migration(tmp_path,attempt):
+    import sqlite3
+    from concurrent.futures import ThreadPoolExecutor
+    path=tmp_path/'legacy.db'
+    with sqlite3.connect(path) as connection:
+        connection.execute('CREATE TABLE project_config(project_id TEXT PRIMARY KEY,aliases TEXT NOT NULL,rooms TEXT NOT NULL)')
+        connection.execute("INSERT INTO project_config VALUES('atlas','[]','[]')")
+    def open_store(_):
+        store=Store(path)
+        version=store._project_config('atlas')['config_revision']
+        store.close()
+        return version
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        assert list(pool.map(open_store,range(2)))==[1,1]
+
+
+def test_renamed_project_is_searchable_for_explicit_upstream_mapping(tmp_path):
+    store=Store(tmp_path/'s.db'); a=source(); store.ingest([a])
+    project=store.project('atlas')
+    store.update_project('atlas',project['config_revision'],name='Northern Launch')
+    assert store.search('Northern Launch deployed',project_id='atlas')
+    assert store.search('Atlas deployed',project_id='atlas')
+    assert store.list_sources()[0]['projects'][0]['name']=='Atlas'
+
+
+def test_independent_processes_initialize_legacy_database(tmp_path):
+    import sqlite3
+    import subprocess
+    import sys
+    path=tmp_path/'legacy-process.db'
+    with sqlite3.connect(path) as connection:
+        connection.execute('CREATE TABLE project_config(project_id TEXT PRIMARY KEY,aliases TEXT NOT NULL,rooms TEXT NOT NULL)')
+        connection.execute("INSERT INTO project_config VALUES('atlas','[]','[]')")
+    script="from work_copilot.store import Store; import sys; print('ready',flush=True); sys.stdin.readline(); s=Store(sys.argv[1]); print(s._project_config('atlas')['config_revision']); s.close()"
+    children=[subprocess.Popen([sys.executable,'-c',script,str(path)],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True) for _ in range(2)]
+    try:
+        for child in children:
+            assert child.stdout.readline().strip()=='ready'
+        for child in children:
+            child.stdin.write('go\n'); child.stdin.flush()
+        for child in children:
+            output,error=child.communicate(timeout=15)
+            assert child.returncode==0,error
+            assert output.strip()=='1'
+    finally:
+        for child in children:
+            if child.poll() is None:
+                child.kill(); child.wait()

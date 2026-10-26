@@ -12,12 +12,12 @@ def default_data_dir(demo=False):
     return base / ('work-copilot-demo' if demo else 'work-copilot')
 
 
-def main():
+def _run():
     parser=argparse.ArgumentParser(description='Local-first Work Copilot. No external sending.')
     parser.add_argument('--timezone',default=os.environ.get('WORK_COPILOT_TIMEZONE','UTC'),help='IANA timezone for Today/follow-ups; default UTC')
     parser.add_argument('--data-dir',type=Path,help='Private state directory (never a public repository)')
     sub=parser.add_subparsers(dest='command',required=True)
-    for name in ['init','demo','serve','capture','export','import','mcp','connect','collect','doctor','activity','drain-activity']:
+    for name in ['init','demo','serve','capture','export','import','mcp','connect','collect','doctor','activity','drain-activity','smoke']:
         p=sub.add_parser(name)
         if name=='activity':
             p.add_argument('--file',type=Path,required=True,help='Structured local session event JSON; no trace scraping')
@@ -40,6 +40,13 @@ def main():
             p.add_argument('--config',type=Path,required=True)
             p.add_argument('--authorize',action='store_true',help='Explicitly initiate OAuth in browser; only approved company server')
     args=parser.parse_args()
+    if args.command=='smoke':
+        from .smoke import run_smoke
+        result=run_smoke()
+        print(json.dumps(result,indent=2,default=str))
+        if not result.get('success'):
+            raise SystemExit(1)
+        return
     from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
     try:
         ZoneInfo(args.timezone)
@@ -47,6 +54,10 @@ def main():
         parser.error('Unknown IANA timezone')
     os.environ['WORK_COPILOT_TIMEZONE']=args.timezone
     data=(args.data_dir or default_data_dir(args.command=='demo')).expanduser().resolve()
+    if args.command=='doctor':
+        from .doctor import diagnose_path
+        print(json.dumps(diagnose_path(data,vault=args.vault,config=args.config,timezone_name=args.timezone),indent=2,default=str))
+        return
     data.mkdir(parents=True,exist_ok=True,mode=0o700)
     if os.name=='posix':
         os.chmod(data,0o700)
@@ -64,6 +75,12 @@ def main():
         serve_mcp(data)
         return
     if args.command in {'serve','demo'}:
+        if args.vault:
+            from .vault import _root
+            _root(args.vault)
+        if args.connector_config:
+            from .remote_mcp import load_config
+            load_config(args.connector_config)
         from .app import create_app
         import uvicorn
         print(f'Work Copilot: http://127.0.0.1:{args.port} | private data: {data}',flush=True)
@@ -111,3 +128,20 @@ def main():
     finally:
         close=getattr(store,'close',None)
         if close: close()
+
+
+def main():
+    try:
+        _run()
+    except ModuleNotFoundError as exc:
+        print(f'Error: Missing dependency {exc.name}. Run the documented launcher to install this checkout’s requirements.',file=sys.stderr)
+        raise SystemExit(1) from None
+    except (OSError,ValueError,RuntimeError) as exc:
+        print(f'Error: {exc}. Check the selected paths and setup guide (docs/GETTING_STARTED.md).',file=sys.stderr)
+        raise SystemExit(1) from None
+    except Exception as exc:
+        import sqlite3
+        if isinstance(exc,sqlite3.Error):
+            print('Error: Cannot open or initialize the local SQLite store. Check directory permissions, available disk space, and that the database is compatible; run doctor for read-only diagnostics.',file=sys.stderr)
+            raise SystemExit(1) from None
+        raise

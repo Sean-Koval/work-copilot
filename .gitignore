@@ -7,6 +7,9 @@ build/
 dist/
 .env*
 *.db
+*.db-*
+*.db.init.lock
+*.db.lock
 *.sqlite*
 .data/
 .worktrees/

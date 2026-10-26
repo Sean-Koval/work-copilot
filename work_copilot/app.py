@@ -21,6 +21,16 @@ class Review(BaseModel):
     changes: dict
 
 
+class PrioritySelection(BaseModel):
+    ids: list[str] = Field(max_length=3)
+    revision: int = Field(ge=1)
+
+
+class ProjectPatch(BaseModel):
+    revision: int = Field(ge=1)
+    changes: dict
+
+
 class ProjectSetup(BaseModel):
     id: str = Field(min_length=1,max_length=100)
     name: str = Field(min_length=1,max_length=200)
@@ -169,6 +179,16 @@ def create_app(data_dir: Path, demo: bool = False, vault: Path | None = None, po
     @app.post('/api/obligations')
     def track(payload: TrackObligation):
         return store.track_obligation(payload.payload)
+
+    @app.post('/api/priorities')
+    def select_priorities(payload: PrioritySelection):
+        return store.set_priorities(payload.ids,payload.revision)
+
+    @app.patch('/api/projects/{project_id}')
+    def update_project(project_id: str,payload: ProjectPatch):
+        if set(payload.changes)-{'name','aliases','rooms'}:
+            raise ValueError('Only name, aliases and rooms can be edited')
+        return store.update_project(project_id,payload.revision,**payload.changes)
 
     @app.post('/api/projects')
     def create_project(payload: ProjectSetup):

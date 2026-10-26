@@ -41,3 +41,25 @@ def test_empty_project_onboarding_and_explicit_capture(tmp_path):
         r=c.post('/api/obligations',json={'payload':{'title':'Waiting on Alex','intent_key':'alex-transcript','project_id':'delta','owner':'me','status':'waiting','body':'Session handoff: request not sent; awaiting transcript.','follow_up_at':'2026-10-27T09:00:00-04:00'}},headers=h)
         assert r.status_code==200,r.text
         assert r.json()['status']=='waiting'
+
+
+def test_edit_room_bindings_priority_and_overdue_ui_contract(tmp_path):
+    app=create_app(tmp_path/'data')
+    with TestClient(app,base_url='http://127.0.0.1:8765') as c:
+        h={'X-Copilot-Token':c.get('/api/session').json()['token']}
+        project=c.post('/api/projects',json={'id':'atlas','name':'Atlas'},headers=h).json()
+        updated=c.patch('/api/projects/atlas',json={'revision':project['config_revision'],'changes':{'rooms':[{'id':'tenant:shared','name':'Shared'}]}},headers=h)
+        assert updated.status_code==200,updated.text
+        assert c.patch('/api/projects/atlas',json={'revision':project['config_revision'],'changes':{'name':'stale'}},headers=h).status_code==409
+        assert c.patch('/api/projects/atlas',json={'revision':updated.json()['config_revision'],'changes':{'unknown':True}},headers=h).status_code==400
+        app.state.store.ingest([{'id':'fixture:room','revision':'1','provider':'fixture','title':'Engineering room','body':'Fictional staging evidence','room_id':'tenant:shared','projects':[],'obligations':[]}])
+        assert c.get('/api/projects/atlas').json()['sources'][0]['id']=='fixture:room'
+        action=c.post('/api/obligations',json={'payload':{'intent_key':'dev-work','title':'Do implementation','project_id':'atlas','status':'open','owner':'me','waiting_on':'Fictional reviewer','commitment':True,'due_at':'2020-01-01','follow_up_at':'2020-01-01'}},headers=h).json()
+        state=c.get('/api/state').json()
+        assert action['id'] in [o['id'] for o in state['week']['overdue']]
+        selected=c.post('/api/priorities',json={'ids':[action['id']],'revision':state['today']['revision']},headers=h)
+        assert selected.status_code==200,selected.text
+        assert selected.json()['kind']=='pinned'
+        assert c.post('/api/priorities',json={'ids':[],'revision':state['today']['revision']},headers=h).status_code==409
+        c.post('/api/obligations/'+action['id']+'/review',json={'revision':action['revision'],'changes':{'status':'resolved'}},headers=h)
+        assert action['id'] not in c.get('/api/state').json()['today']['priorities']

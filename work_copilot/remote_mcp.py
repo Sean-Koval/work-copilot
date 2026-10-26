@@ -144,26 +144,74 @@ class KeyringStorage:
 
 
 def load_config(path):
-    config = json.loads(Path(path).read_text())
-    endpoint = urlparse(config.get('endpoint', ''))
+    """Validate local configuration before credentials, status writes or network I/O.
+
+    Errors name the field, never echo untrusted values (which may contain secrets).
+    Discovery may omit tool selection; collection still requires an allowlist.
+    """
+    try:
+        config = json.loads(Path(path).read_text())
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise ValueError('Configuration must contain valid UTF-8 JSON') from None
+    if not isinstance(config, dict):
+        raise ValueError('Configuration must be a JSON object')
+    endpoint_value = config.get('endpoint')
+    if not isinstance(endpoint_value, str):
+        raise ValueError('endpoint must be an HTTPS URL string')
+    try:
+        endpoint = urlparse(endpoint_value)
+        port = endpoint.port
+    except ValueError:
+        raise ValueError('endpoint must be a valid HTTPS URL with a valid port') from None
     local = endpoint.hostname in {'127.0.0.1', 'localhost'}
-    if endpoint.scheme != 'https' and not (local and endpoint.scheme == 'http'):
-        raise ValueError('MCP endpoint requires HTTPS (HTTP allowed only for loopback testing)')
+    if not endpoint.hostname or any(c.isspace() for c in endpoint_value) or (endpoint.scheme != 'https' and not (local and endpoint.scheme == 'http')):
+        raise ValueError('endpoint requires HTTPS and a host (HTTP allowed only for loopback testing)')
     if endpoint.username or endpoint.password or endpoint.fragment or endpoint.query:
-        raise ValueError('MCP endpoint must not contain credentials, query or fragment')
-    if config.get('storage') not in {'keyring', 'protected-file'}:
+        raise ValueError('endpoint must not contain credentials, query or fragment')
+    if config.get('storage') not in ('keyring', 'protected-file'):
         raise ValueError('Choose storage explicitly: keyring or protected-file (unencrypted POSIX 0600)')
-    if not isinstance(config.get('allowed_read_tools', []), list):
-        raise ValueError('allowed_read_tools must be a list')
-    port = config.get('callback_port', 8766)
-    if not isinstance(port, int) or not 1024 <= port <= 65535:
-        raise ValueError('callback_port must be 1024..65535')
+    allowed = config.get('allowed_read_tools', [])
+    if not isinstance(allowed, list) or any(not isinstance(name, str) or not name.strip() for name in allowed):
+        raise ValueError('allowed_read_tools must be a list of nonempty tool-name strings')
+    for field in ('tool', 'scope', 'client_id', 'cursor_argument', 'checkpoint_argument'):
+        if field in config and (not isinstance(config[field], str) or not config[field].strip()):
+            raise ValueError(field + ' must be a nonempty string when specified')
+    if 'trust_env' in config and not isinstance(config['trust_env'], bool):
+        raise ValueError('trust_env must be a JSON boolean')
+    if not isinstance(config.get('arguments', {}), dict):
+        raise ValueError('arguments must be a JSON object using the verified tool schema')
+    if 'client_metadata_url' in config:
+        value = config['client_metadata_url']
+        if not isinstance(value, str):
+            raise ValueError('client_metadata_url must be an administrator-approved HTTPS URL')
+        try:
+            metadata = urlparse(value)
+            _ = metadata.port
+            valid = metadata.scheme == 'https' and metadata.hostname and not (metadata.username or metadata.password or metadata.fragment or metadata.query) and not any(c.isspace() for c in value)
+        except ValueError:
+            valid = False
+        if not valid:
+            raise ValueError('client_metadata_url must be an administrator-approved HTTPS URL without credentials, query or fragment')
+    callback_port = config.get('callback_port', 8766)
+    if type(callback_port) is not int or not 1024 <= callback_port <= 65535:
+        raise ValueError('callback_port must be an integer from 1024 to 65535')
     config.setdefault('name', 'remote-mcp')
     if not isinstance(config['name'], str) or not config['name'].strip() or len(config['name']) > 100:
         raise ValueError('Connector name must be a nonempty string up to 100 characters')
     config.setdefault('max_pages', 20)
-    if not 1 <= config['max_pages'] <= 100:
-        raise ValueError('max_pages must be 1..100')
+    if type(config['max_pages']) is not int or not 1 <= config['max_pages'] <= 100:
+        raise ValueError('max_pages must be an integer from 1 to 100')
+    mapping = config.get('mapping', {})
+    if not isinstance(mapping, dict):
+        raise ValueError('mapping must be a JSON object')
+    for field in ('items_path', 'next_cursor_path', 'checkpoint_path'):
+        if field in mapping and (not isinstance(mapping[field], str) or not mapping[field] or any(not part for part in mapping[field].split('.'))):
+            raise ValueError('mapping.' + field + ' must be a nonempty dot-separated object path')
+    fields = mapping.get('fields', {})
+    if not isinstance(fields, dict) or any(not key or not isinstance(value, str) or not value or any(not part for part in value.split('.')) for key, value in fields.items()):
+        raise ValueError('mapping.fields must map output names to nonempty dot-separated object paths')
+    if not isinstance(mapping.get('constants', {}), dict):
+        raise ValueError('mapping.constants must be a JSON object')
     return config
 
 

@@ -90,11 +90,12 @@ function obligationCard(item, reviewMode = false) {
   if (item.commitment) meta.append(tag('Commitment'));
   append(card, meta, $('h3','',item.title));
   if (item.review_reason) card.append($('p','draft-warning',readable(item.review_reason)));
+  if(item.waiting_on) card.append($('p','',`Waiting on: ${item.waiting_on}`));
   const owner = item.owner === 'me' ? 'You own this' : item.owner ? `Owner: ${item.owner}` : 'Ownership needs review';
   append(card, $('p','',`${owner} · ${item.due_at ? `Due ${date(item.due_at)}` : 'No deadline stated'}`), $('div','freshness',`Question: ${readable(item.question_state)} · Evidence: ${readable(item.freshness)}`), item.follow_up_at ? $('p','follow-up',`Follow up ${date(item.follow_up_at)} · reminder, not a deadline`) : null);
   const actions = $('div','card-actions');
-  actions.append(button('Prepare reply ↗', () => openDraft(item), 'btn primary small'));
-  if (!reviewMode) actions.append(button('Review', () => { const form = card.querySelector('.review-form'); if (form) form.remove(); else card.append(reviewForm(item)); }, 'btn small'));
+  if (!reviewMode) actions.append(button('Review / update', () => { const form = card.querySelector('.review-form'); if (form) form.remove(); else card.append(reviewForm(item)); }, 'btn primary small'));
+  actions.append(button('Prepare reply (optional) ↗', () => openDraft(item), 'btn small'));
   append(card, actions, evidence(item.evidence));
   if (reviewMode) card.append(reviewForm(item));
   return card;
@@ -122,6 +123,7 @@ function itemList(items, reviewMode = false, emptyText = 'Nothing here within th
   const list = $('div','stack'); if (!items.length) list.append(empty(emptyText));
   items.forEach(item => list.append(obligationCard(item,reviewMode))); return list;
 }
+function focusEligible(items) { return items.filter(item => item.owner === 'me' && item.status === 'open'); }
 function today() {
   const active = state.obligations.filter(o => !['resolved','dismissed'].includes(o.status));
   const owed = active.filter(o => o.owner === 'me' && o.status === 'open');
@@ -130,7 +132,7 @@ function today() {
   const day = state.today?.date || new Date().toISOString().slice(0,10);
   append(main,heading(new Date(`${day}T12:00:00`).toLocaleDateString(undefined,{weekday:'long',month:'long',day:'numeric'}),'A clearer working day.','The context is gathered. Here’s what needs your attention — and what can wait.'));
   const strip = $('div','summary-strip');
-  [[owed.length,'NEEDS YOUR RESPONSE'],[waiting.length,'WAITING ON OTHERS'],[review.length,'READY FOR REVIEW'],[state.projects.length,'PROJECTS IN CONTEXT']].forEach(([n,label]) => strip.append(append($('div','stat'),$('b','',String(n).padStart(2,'0')),$('span','',label))));
+  [[owed.length,'NEEDS YOUR ATTENTION'],[waiting.length,'WAITING ON OTHERS'],[review.length,'READY FOR REVIEW'],[state.projects.length,'PROJECTS IN CONTEXT']].forEach(([n,label]) => strip.append(append($('div','stat'),$('b','',String(n).padStart(2,'0')),$('span','',label))));
   main.append(strip);
   if (!state.projects.length) main.append(onboarding());
   const captureBar = $('div','capture-bar'); append(captureBar,$('span','','A meeting, an untagged update, a decision worth keeping.'),append($('div','card-actions'),button('Track waiting / action',openTrack,'btn small'),button('＋ Capture a note', openCapture, 'btn small'))); main.append(captureBar);
@@ -138,10 +140,11 @@ function today() {
   append(left,sectionTitle('Needs you',owed.length,'Evidence-backed, not inbox-driven'),itemList(owed));
   if (waiting.length) append(left,append($('div','section-gap'),sectionTitle('Waiting',waiting.length),itemList(waiting)));
   const plan = $('section','card plan aside-block');
-  append(plan,$('div','eyebrow','YOUR ANCHORED PLAN'),$('h2','','Today, in focus'),$('p','subtle-note','Suggested priorities, held steady for the day. New urgency is surfaced separately.'));
-  const priorities = (state.today?.priorities || []).map(id => state.obligations.find(o => o.id === (id.id || id))).filter(Boolean);
+  append(plan,$('div','eyebrow','YOUR ANCHORED PLAN'),$('h2','','Today, in focus'),$('p','subtle-note',state.today?.kind === 'pinned' ? 'Your pinned focus, in your chosen order. New urgency is surfaced separately.' : 'Suggested priorities, held steady for the day. Pin your own focus below; new urgency is separate.'));
+  const priorities = (state.today?.priorities || []).map(id => state.obligations.find(o => o.id === (id.id || id))).filter(item => item && item.owner === 'me' && item.status === 'open');
   priorities.forEach((item,i) => plan.append(append($('div','plan-item'),$('span','plan-number',i+1),append($('div'),$('h3','',item.title),$('p','',`${projectName(item.project_id)} · ${item.commitment ? 'Explicit commitment' : 'Suggested focus'}`)))));
   if (!priorities.length) plan.append($('p','subtle-note','No priorities yet. Add explicit obligations through a selected note or JSON import.'));
+  plan.append(button('Choose today’s focus',openPriorities,'btn small'));
   right.append(plan);
   const urgent = (state.today?.new_urgency || []).map(id => state.obligations.find(o => o.id === (id.id || id))).filter(Boolean);
   if (urgent.length) { const urgentBox = $('section','aside-block'); append(urgentBox,sectionTitle('New urgency',urgent.length),itemList(urgent)); right.append(urgentBox); }
@@ -153,12 +156,34 @@ function today() {
   append(columns,left,right); main.append(columns);
   main.append($('p','subtle-note',state.coverage_note || 'Only selected, successfully captured sources are represented.'));
 }
+function openPriorities() {
+  const revision = state.today.revision;
+  const content = document.querySelector('#draft-content'); content.replaceChildren();
+  const title = $('h2','','Choose today’s focus'); title.id = 'draft-title';
+  append(content,append($('div','dialog-heading'),title,button('Close',()=>dialog.close(),'btn small')),$('p','lede','Pin up to three owned open actions, in order. Waiting and finished work stay outside focus. This does not change commitments, deadlines, or ownership.'));
+  const eligible = focusEligible(state.obligations);
+  const current = (state.today?.priorities || []).filter(id => eligible.some(item => item.id === id));
+  const choices = [];
+  for(let i=0;i<3;i++) {
+    const choice = selectControl(`Focus ${i+1}`,[['','Leave empty'],...eligible.map(item=>[item.id,`${projectName(item.project_id)} · ${item.title}`])],current[i] || '');
+    choice.label.classList.add('priority-choice'); content.append(choice.label); choices.push(choice.select);
+  }
+  content.append(button('Pin focus for today',async()=>{
+    const ids = choices.map(choice=>choice.value).filter(Boolean);
+    if(new Set(ids).size !== ids.length) throw new Error('Choose each action only once.');
+    await request('/api/priorities','POST',{ids,revision});
+    dialog.close(); await refresh(); notice('Today’s focus pinned. New urgency will not silently reorder it.');
+  },'btn primary'));
+  if (!dialog.open) dialog.showModal();
+}
 function week() {
   append(main,heading('DIRECTION, NOT JUST ACTIVITY','This week','Keep explicit commitments separate from suggested next steps. Dates are only shown when supplied by a source.'));
   const w = state.week || {}; main.append($('p','lede',`${date(w.start)} — ${date(w.end)}`));
   const cols = $('div','columns section-gap');
   append(cols,append($('section'),sectionTitle('Explicit commitments',(w.commitments || []).length),itemList(w.commitments || [])),append($('section'),sectionTitle('Suggested next steps',(w.suggestions || []).length),$('p','lede','Suggestions are not promises or automatically assigned work.'),itemList(w.suggestions || [])));
   main.append(cols);
+  const overdue = $('section','section-gap'); append(overdue,sectionTitle('Overdue, including earlier weeks',(w.overdue || []).length),itemList(w.overdue || [],false,'No overdue dated items in captured context.')); main.append(overdue);
+  const rest = $('details','section-gap'); rest.append($('summary','',`Undated (${(w.undated || []).length}) and other dates (${(w.backlog || []).length})`)); append(rest,sectionTitle('Undated'),itemList(w.undated || []),sectionTitle('Other dates'),itemList(w.backlog || [])); main.append(rest);
   main.append($('p','subtle-note',`${(w.undated || []).length} undated items and ${(w.backlog || []).length} items outside this week remain in Today/attention; they are not commitments for this week.`));
 }
 function projects() {
@@ -172,9 +197,9 @@ function projects() {
 async function projectPage(id) {
   const p = await request(`/api/projects/${encodeURIComponent(id)}`);
   if (currentRoute !== `project/${encodeURIComponent(id)}`) return;
-  main.replaceChildren(); append(main,heading('PROJECT KNOWLEDGE',p.name,'A linked view of the original sources. This synthesis is not a substitute for the authoritative systems.'));
+  main.replaceChildren(); append(main,heading('PROJECT KNOWLEDGE',p.name,'A linked view of the original sources. This synthesis is not a substitute for the authoritative systems.'),button('Edit project',()=>openProjectCreate(p),'btn small'));
   const tags = $('div','tags'); (p.workstreams || []).forEach(w => tags.append(tag(typeof w === 'string' ? w : w.name))); main.append(tags);
-  const rooms = $('section','card section-gap'); append(rooms,sectionTitle('Connected rooms',(p.rooms || []).length),$('p','','A room can belong to more than one project. Links are explicit, not inferred ownership.'));
+  const rooms = $('section','card section-gap'); append(rooms,sectionTitle('Connected rooms',(p.rooms || []).length),$('p','','Exact configured room IDs can map incoming sources when no explicit project mapping is supplied. A shared room may support several projects. This does not discover rooms or grant remote access.'));
   const roomTags = $('div','tags'); (p.rooms || []).forEach(r => roomTags.append(tag(r.name || r.id,'neutral'))); rooms.append(roomTags); main.append(rooms);
   const cols = $('div','columns section-gap'); append(cols,append($('section'),sectionTitle('Obligations',(p.obligations || []).length),itemList(p.obligations || [])),append($('section'),sectionTitle('Source knowledge',(p.sources || []).length),evidence(p.sources,true))); main.append(cols);
 }
@@ -201,19 +226,23 @@ function onboarding() {
   steps.append(append($('li'),$('b','','Inspect, then connect. '),$('span','','Read the original evidence in Search or Projects. Run “work-copilot doctor” to check local setup; configure remote MCP only with approved access.')));
   append(card,steps,append($('div','card-actions'),button('Create project',openProjectCreate,'btn primary'),button('Capture a note',openCapture,'btn')));return card;
 }
-function openProjectCreate() {
+function openProjectCreate(project = null) {
   const content = document.querySelector('#draft-content'); content.replaceChildren();
-  const title = $('h2','','Create project'); title.id = 'draft-title';
+  const title = $('h2','',project ? 'Edit project' : 'Create project'); title.id = 'draft-title';
   append(content,append($('div','dialog-heading'),title,button('Close',()=>dialog.close(),'btn small')),$('p','lede','Stable project IDs connect notes, rooms and obligations. Aliases are hints for review, not permission to silently assign ambiguous evidence.'));
   const id = field('Stable project ID'); id.input.placeholder = 'e.g. atlas'; id.input.maxLength = 100;
   const name = field('Project name'); name.input.placeholder = 'e.g. Atlas launch'; name.input.maxLength = 200;
+  if(project){id.input.value = project.id;id.input.disabled = true;name.input.value = project.name;}
   const aliases = field('Aliases (optional, comma-separated)'); aliases.input.placeholder = 'Atlas pilot, AL';
   const rooms = field('Room IDs (optional, comma-separated)'); rooms.input.placeholder = 'delivery-room, commercial-room';
-  append(content,id.label,name.label,aliases.label,rooms.label,$('p','subtle-note','Room IDs should be the exact stable identifiers in your imported sources. You can link multiple rooms and share a room across projects. Workstreams are assigned when capturing or mapping source evidence.'),button('Create project',async()=>{
+  if(project){aliases.input.value = (project.aliases || []).join(', ');rooms.input.value = (project.configured_rooms || project.rooms || []).map(room=>room.id).join(', ');}
+  append(content,id.label,name.label,aliases.label,rooms.label,$('p','subtle-note','Exact room IDs route incoming sources only when explicit project mappings are absent. Shared IDs can map to multiple projects. This is a local binding, not room discovery or remote access. Aliases remain review suggestions.'),button(project ? 'Save project' : 'Create project',async()=>{
     if (!id.input.value.trim() || !name.input.value.trim()) throw new Error('Enter a stable ID and project name.');
     const split = value => [...new Set(value.split(',').map(x=>x.trim()).filter(Boolean))];
-    await request('/api/projects','POST',{id:id.input.value.trim(),name:name.input.value.trim(),aliases:split(aliases.input.value),rooms:split(rooms.input.value).map(value=>({id:value,name:value}))});
-    dialog.close(); await refresh(); notice('Project created locally. Capture or map evidence to begin its knowledge view.');
+    const values = {name:name.input.value.trim(),aliases:split(aliases.input.value),rooms:split(rooms.input.value).map(value=>({id:value,name:(project?.configured_rooms || []).find(room=>room.id === value)?.name || value}))};
+    if(project) await request(`/api/projects/${encodeURIComponent(project.id)}`,'PATCH',{revision:project.config_revision,changes:values});
+    else await request('/api/projects','POST',{id:id.input.value.trim(),...values});
+    dialog.close(); await refresh(); notice(project ? 'Project configuration updated locally.' : 'Project created locally. Capture or map evidence to begin its knowledge view.');
   },'btn primary'));
   if (!dialog.open) dialog.showModal();
 }
@@ -251,12 +280,15 @@ function openTrack() {
   const project = selectControl('Project',[['','Unmapped — review later'],...state.projects.map(p=>[p.id,p.name])],'');
   const status = selectControl('State',[['waiting','Waiting'],['open','Open action'],['candidate','Candidate to review']],'waiting');
   const owner = selectControl('Owner',[['me','Me'],['','Unresolved']],'me');
-  const followup = field('Follow up at (your local time, optional)','datetime-local');
+  const followup = field('Reminder, not a promise — follow up at (local time, optional)','datetime-local');
+  const due = field('Promised due date (local time, optional)','datetime-local');
+  const waitingOn = field('Waiting on (person or dependency, optional)'); waitingOn.input.maxLength = 200;
+  const commitment = field('This is an explicit commitment, not a suggestion','checkbox'); commitment.input.checked = false;
   const bodyLabel = $('label','source-meta','Optional supporting context'); bodyLabel.htmlFor = 'track-evidence'; const body = $('textarea','draft-editor'); body.id = 'track-evidence'; body.rows = 3;
-  append(content,name.label,intent.label,append($('div','form-row'),project.label,status.label,owner.label),followup.label,bodyLabel,body,button('Track locally',async()=>{
+  append(content,name.label,intent.label,append($('div','form-row'),project.label,status.label,owner.label),waitingOn.label,followup.label,due.label,commitment.label,bodyLabel,body,button('Track locally',async()=>{
     if(!name.input.value.trim() || !intent.input.value.trim()) throw new Error('Add a title and a stable intent key. Reuse the key only for the same request.');
-    await request('/api/obligations','POST',{payload:{title:name.input.value.trim(),intent_key:intent.input.value.trim(),project_id:project.select.value || null,status:status.select.value,owner:owner.select.value || null,follow_up_at:followup.input.value ? new Date(followup.input.value).toISOString() : null,body:body.value}});
-    dialog.close(); await refresh(); notice('Tracked locally. No message sent and no deadline promised.');
+    await request('/api/obligations','POST',{payload:{title:name.input.value.trim(),intent_key:intent.input.value.trim(),project_id:project.select.value || null,status:status.select.value,owner:owner.select.value || null,follow_up_at:followup.input.value ? new Date(followup.input.value).toISOString() : null,due_at:due.input.value ? new Date(due.input.value).toISOString() : null,waiting_on:waitingOn.input.value.trim() || null,commitment:commitment.input.checked,body:body.value}});
+    dialog.close(); await refresh(); notice('Tracked locally with only the reminder, due date and commitment you supplied. No message sent.');
   },'btn primary'));
   dialog.showModal();
 }

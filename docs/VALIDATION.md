@@ -47,3 +47,18 @@ Expected: one canonical transcript obligation, retained note/source citation, ex
 ## Deliberately staged capabilities
 
 Raw collection is not automatic semantic extraction. Existing project aliases supply narrow mapping suggestions only. Structured source fields, user reviews, or client-agent tool calls create obligations. Offline reply templates are labeled; high-quality model writing stays in the user's chosen approved agent. Proposed correction learnings are reviewable source context, not accepted global rules. Hooks transport explicit receipts; they do not scrape activity or prove work completed.
+
+## Local-install readiness pass — 2026-10-26
+
+Continued the existing published MVP, without a version bump, release tag, license change, or company-account connection.
+
+- **140 tests passed**, one upstream Starlette/httpx deprecation warning. This supersedes the 79-test baseline for this reviewed readiness tree, not for all future checkouts.
+- New `smoke` command runs nine named phases in an isolated temporary workspace: fresh store, many-to-many projects/rooms, source capture/original preservation, waiting/follow-up/search/draft, edit freshness, activity queue, generated wiki, reopen/deduplication, and actual SDK stdio retrieval. It has no model, credential, or network requirement after installation; supplied real data/vault settings are ignored.
+- The final package was installed non-editably into a separate fresh virtual environment. Outside the checkout, the nine-phase smoke passed; a real localhost HTTP fresh/restart exercise also passed project editing, capture, search, action/waiting, overdue, pinning, template drafting, original/wiki persistence, and nonmutating doctor checks.
+- `doctor` no longer initializes a store or changes directory permissions. Both diagnostic APIs inspect a private temporary database/WAL snapshot; tests preserve original database/WAL/SHM bytes, modes and timestamps, including missing/corrupt paths and custom database filenames.
+- Readiness corrections include exact room-to-project routing, revision-checked configuration edits and pinned priorities, distinct action/reminder/deadline/commitment fields, visible overdue work, and removal of completed/waiting items from personal focus.
+- MCP machine identities/revisions remain byte-exact. Urgency lists and direct evidence have usable page cursors; tests cover 900 overdue obligations, long source IDs/revisions, and more than eight manually linked sources. Display snippets—not identities—are shortened.
+- Initialization is serialized across independent processes, including WAL configuration and legacy schema migration. The regression suite includes 20 concurrency rounds and synchronized independent-process startup. Project rename/search preserves upstream original text while indexing the current canonical name.
+- JavaScript syntax, executed pure focus-selection behavior, Python compilation, whitespace checks, and local documentation links were checked. This does not establish rendered-browser usability.
+
+The new command and laptop instructions are in [Getting started](GETTING_STARTED.md). [Client setup](CLIENT_SETUP.md) distinguishes officially documented configuration syntax from an actually executed agent session. The earlier blocked model/browser tests remain blocked/unverified; no retry into restricted paths was performed in this readiness pass.

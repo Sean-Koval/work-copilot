@@ -141,3 +141,26 @@ def test_sdk_oauth_logs_are_redacted(caplog):
         logger.exception('token error fictional-sensitive-token-and-code')
     assert 'fictional-sensitive-token-and-code' not in caplog.text
     assert 'redacted' in caplog.text
+
+@pytest.mark.parametrize('change,field',[
+    ({'endpoint':'https:///mcp'},'endpoint'),
+    ({'allowed_read_tools':['read',42]},'allowed_read_tools'),
+    ({'arguments':[]},'arguments'),
+    ({'max_pages':True},'max_pages'),
+    ({'max_pages':'20'},'max_pages'),
+    ({'trust_env':'false'},'trust_env'),
+    ({'mapping':[]},'mapping'),
+    ({'mapping':{'fields':{'id':42}}},'mapping.fields'),
+    ({'mapping':{'items_path':''}},'mapping.items_path'),
+    ({'client_metadata_url':'http://evil.invalid/client'},'client_metadata_url'),
+    ({'scope':['read']},'scope'),
+])
+def test_config_rejects_unsafe_field_types(tmp_path,change,field):
+    config={'endpoint':'https://example.invalid/mcp','storage':'protected-file',**change}
+    path=tmp_path/'config.json';path.write_text(json.dumps(config))
+    with pytest.raises(ValueError,match=field):load_config(path)
+
+
+def test_config_root_must_be_object(tmp_path):
+    path=tmp_path/'config.json';path.write_text('[]')
+    with pytest.raises(ValueError,match='JSON object'):load_config(path)
