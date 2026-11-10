@@ -35,7 +35,7 @@ class VaultTests(VaultFixture):
         note.write_text(original)
         capture_vault(self.store, self.root)
         first = next(iter(self.store.sources.values())).copy()
-        self.assertEqual(note.read_text(), original)
+        self.assertEqual(note.read_text(encoding='utf-8'), original)
         note.write_text(original + 'More context.\n')
         capture_vault(self.store, self.root)
         second = next(iter(self.store.sources.values()))
@@ -79,7 +79,7 @@ class VaultTests(VaultFixture):
         (generated / 'README.md').write_text('My own file')
         with self.assertRaises(ValueError):
             export_projects(self.store, self.root)
-        self.assertEqual((generated / 'README.md').read_text(), 'My own file')
+        self.assertEqual((generated / 'README.md').read_text(encoding='utf-8'), 'My own file')
 
 if __name__ == '__main__':
     unittest.main()
@@ -90,7 +90,7 @@ class InboxTests(VaultFixture):
         first = write_inbox_note(self.store, self.root, 'Meeting', 'Decision: use staging.\nRisk: release uncertain.')
         second = write_inbox_note(self.store, self.root, 'Meeting', 'Awareness: no action assigned.')
         self.assertNotEqual(first['path'], second['path'])
-        self.assertIn('Risk: release uncertain.', Path(first['path']).read_text())
+        self.assertIn('Risk: release uncertain.', Path(first['path']).read_text(encoding='utf-8'))
         self.assertEqual(len(self.store.sources), 2)
     def test_inbox_symlink_rejected(self):
         from work_copilot.vault import write_inbox_note
@@ -117,11 +117,11 @@ class IntegrationTests(VaultFixture):
         self.assertFalse(self.store.list_sources()[0]['deleted'])
         result = export_projects(self.store, self.root)
         project = next(p for p in result['files'] if p.startswith('Project-'))
-        projected = (self.root / GENERATED_DIR / project).read_text()
+        projected = (self.root / GENERATED_DIR / project).read_text(encoding='utf-8')
         self.assertIn('Decision: staging first.', projected)
         self.assertIn('L4:', projected)
         self.assertNotIn('<script>', projected)
-        self.assertEqual(note.read_text(), original)
+        self.assertEqual(note.read_text(encoding='utf-8'), original)
         capture_vault(self.store, self.root)
         self.assertEqual(len(self.store.list_sources()), 1)
         self.store.close()
@@ -133,7 +133,7 @@ class ReviewExportTests(VaultFixture):
             def snapshot(self):
                 return {'projects': [], 'review': [{'id':'o1', 'title':'Release answer', 'status':'open', 'review_reason':'Source owner changed'}]}
         export_projects(ConflictLedger(), self.root)
-        review = (self.root / GENERATED_DIR / 'Review.md').read_text()
+        review = (self.root / GENERATED_DIR / 'Review.md').read_text(encoding='utf-8')
         self.assertIn('Release answer', review)
         self.assertIn('Source owner changed', review)
 
@@ -166,7 +166,7 @@ class InboxMetadataTests(VaultFixture):
         dropped = next(s for s in self.store.sources.values() if s['title'] == 'Dropped.md')
         self.assertEqual(pasted['projects'], dropped['projects'])
         self.assertEqual(pasted['obligations'], dropped['obligations'])
-        self.assertTrue(Path(receipt['path']).read_text().startswith('---\n'))
+        self.assertTrue(Path(receipt['path']).read_text(encoding='utf-8').startswith('---\n'))
 
 class ExplicitCaptureTests(VaultFixture):
     def test_optional_project_selection_needs_no_frontmatter(self):
@@ -176,4 +176,4 @@ class ExplicitCaptureTests(VaultFixture):
         self.assertEqual({p['id'] for p in source['projects']}, {'atlas', 'beacon'})
         self.assertEqual(source['workstream'], 'engineering')
         self.assertEqual(source['obligations'], [])
-        self.assertIn('Decision: staging first.', Path(result['path']).read_text())
+        self.assertIn('Decision: staging first.', Path(result['path']).read_text(encoding='utf-8'))

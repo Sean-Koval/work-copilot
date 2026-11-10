@@ -23,7 +23,7 @@ def test_startup_failure_is_actionable_without_traceback(tmp_path):
     assert result.returncode!=0
     assert 'Traceback' not in result.stderr
     assert 'Error:' in result.stderr
-    assert file.read_text()=='keep'
+    assert file.read_text(encoding='utf-8')=='keep'
 
 
 def test_cli_smoke_isolated_from_selected_user_data(tmp_path):
@@ -34,7 +34,7 @@ def test_cli_smoke_isolated_from_selected_user_data(tmp_path):
     report=json.loads(result.stdout)
     assert report['success'] and report['synthetic_only']
     assert list(user.iterdir())==[sentinel]
-    assert sentinel.read_text()=='untouched'
+    assert sentinel.read_text(encoding='utf-8')=='untouched'
 
 
 def test_invalid_selected_vault_fails_before_service_start(tmp_path):

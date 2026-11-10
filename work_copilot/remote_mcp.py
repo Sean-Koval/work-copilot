@@ -58,7 +58,7 @@ class ProtectedFileStorage:
             return {}
         if self.path.is_symlink() or self.path.stat().st_mode & 0o077:
             raise ValueError('Credential file must be private (0600) and not a symlink')
-        return json.loads(self.path.read_text())
+        return json.loads(self.path.read_text(encoding='utf-8'))
 
     def _write(self, key, value):
         payload = self._read()
@@ -68,7 +68,7 @@ class ProtectedFileStorage:
         temp = self.path.with_name(self.path.name + '.' + secrets.token_hex(8))
         fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         try:
-            with os.fdopen(fd, 'w') as out:
+            with os.fdopen(fd, 'w', encoding='utf-8') as out:
                 json.dump(payload, out)
                 out.flush(); os.fsync(out.fileno())
             os.replace(temp, self.path)
@@ -150,7 +150,7 @@ def load_config(path):
     Discovery may omit tool selection; collection still requires an allowlist.
     """
     try:
-        config = json.loads(Path(path).read_text())
+        config = json.loads(Path(path).read_text(encoding='utf-8'))
     except (json.JSONDecodeError, UnicodeDecodeError):
         raise ValueError('Configuration must contain valid UTF-8 JSON') from None
     if not isinstance(config, dict):
