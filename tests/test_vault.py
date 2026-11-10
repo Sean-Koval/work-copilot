@@ -21,7 +21,7 @@ class Ledger:
 class VaultFixture(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp.name) / 'vault'
+        self.root = Path(self.temp.name).resolve() / 'vault'
         self.root.mkdir()
         self.store = Ledger()
     def tearDown(self):
