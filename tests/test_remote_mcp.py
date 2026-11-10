@@ -86,7 +86,7 @@ async def test_real_http_mcp_oauth_discovery_collect_restart(tmp_path, monkeypat
         result=await remote_discover(store,config,tmp_path,True)
         assert any(t['name']=='read_messages' for t in result['tools'])
         credential=next((tmp_path/'oauth').glob('*.json'))
-        saved=json.loads(credential.read_text());saved['expires_at']=0;credential.write_text(json.dumps(saved))
+        saved=json.loads(credential.read_text(encoding='utf-8'));saved['expires_at']=0;credential.write_text(json.dumps(saved))
         store.close(); store=Store(tmp_path/'copilot.db')
         result=await remote_collect(store,config,tmp_path,False)
         assert result['items']==1 and store.list_sources()[0]['id']=='fictional:room:1'
@@ -99,7 +99,7 @@ async def test_real_http_mcp_oauth_discovery_collect_restart(tmp_path, monkeypat
         assert store.draft(obligation['id'])['stale'] is True
         await remote_collect(store,config,tmp_path,False)
         assert store.draft(obligation['id'])['stale'] is False
-        settings=json.loads(config.read_text());settings.update(tool='send_message',allowed_read_tools=['send_message']);config.write_text(json.dumps(settings))
+        settings=json.loads(config.read_text(encoding='utf-8'));settings.update(tool='send_message',allowed_read_tools=['send_message']);config.write_text(json.dumps(settings))
         with pytest.raises(RuntimeError,match='Remote MCP collection failed') as failure:
             await remote_collect(store,config,tmp_path,False)
         assert 'test-access' not in str(failure.value)

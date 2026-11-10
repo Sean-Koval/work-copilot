@@ -5,7 +5,7 @@ ROOT = Path(__file__).parents[1] / 'work_copilot' / 'static'
 
 
 def test_dashboard_has_accessible_local_shell():
-    html = (ROOT / 'index.html').read_text()
+    html = (ROOT / 'index.html').read_text(encoding='utf-8')
     assert 'aria-live="polite"' in html
     assert 'id="main"' in html
     assert '/static/app.js' in html
@@ -13,7 +13,7 @@ def test_dashboard_has_accessible_local_shell():
 
 
 def test_untrusted_data_never_uses_html_sinks():
-    js = (ROOT / 'app.js').read_text()
+    js = (ROOT / 'app.js').read_text(encoding='utf-8')
     for unsafe in ('innerHTML', 'outerHTML', 'insertAdjacentHTML', 'eval('):
         assert unsafe not in js
     assert 'textContent' in js
@@ -23,21 +23,21 @@ def test_untrusted_data_never_uses_html_sinks():
 
 
 def test_ui_separates_review_from_send_and_has_freshness():
-    js = (ROOT / 'app.js').read_text()
+    js = (ROOT / 'app.js').read_text(encoding='utf-8')
     for phrase in ('Nothing is sent', 'This week', 'New urgency', 'Evidence', 'Offline template', 'Copy reply', 'suggestions', 'question_state'):
         assert phrase in js
     assert '/send' not in js
 
 
 def test_search_and_manual_followup_are_explicit():
-    js = (ROOT / 'app.js').read_text()
+    js = (ROOT / 'app.js').read_text(encoding='utf-8')
     for text in ('/api/search?', 'Ranked lexical', 'follow_up_at', 'Track waiting / action', '/api/obligations'):
         assert text in js
     assert 'name="search-query"' not in js  # DOM construction, not HTML templates
 
 
 def test_empty_workspace_has_project_onboarding():
-    js = (ROOT / 'app.js').read_text()
+    js = (ROOT / 'app.js').read_text(encoding='utf-8')
     assert 'Create project' in js
     assert "request('/api/projects','POST'" in js
     assert 'First-run checklist' in js
@@ -45,7 +45,7 @@ def test_empty_workspace_has_project_onboarding():
 
 
 def test_attention_pinning_and_week_overdue_contract():
-    js = (ROOT / 'app.js').read_text()
+    js = (ROOT / 'app.js').read_text(encoding='utf-8')
     assert 'NEEDS YOUR ATTENTION' in js
     assert 'NEEDS YOUR RESPONSE' not in js
     assert "request('/api/priorities','POST'" in js
@@ -56,7 +56,7 @@ def test_attention_pinning_and_week_overdue_contract():
 
 
 def test_track_distinguishes_reminder_from_promise():
-    js = (ROOT / 'app.js').read_text()
+    js = (ROOT / 'app.js').read_text(encoding='utf-8')
     for phrase in ('waiting_on:', 'due_at:', 'commitment:commitment.input.checked', 'Promised due date', 'Reminder, not a promise'):
         assert phrase in js
 
@@ -70,7 +70,7 @@ def test_focus_eligibility_executes_for_mixed_statuses():
     node = shutil.which('node')
     if not node:
         pytest.skip('Node is optional; run node --check and UI behavior checks in frontend QA')
-    js = (ROOT / 'app.js').read_text()
+    js = (ROOT / 'app.js').read_text(encoding='utf-8')
     helper = re.search(r'function focusEligible\(items\) \{[^\n]+\}', js).group()
     items = [{'id': status, 'owner': 'me', 'status': status} for status in ['open','waiting','resolved','dismissed','candidate']]
     items += [{'id':'other','owner':'person:alex','status':'open'}]
@@ -79,6 +79,6 @@ def test_focus_eligibility_executes_for_mixed_statuses():
 
 
 def test_project_edit_preserves_config_revision_and_explicit_room_bindings():
-    js = (ROOT / 'app.js').read_text()
+    js = (ROOT / 'app.js').read_text(encoding='utf-8')
     for text in ('Edit project', 'revision:project.config_revision', 'configured_rooms', "'PATCH'", 'Exact room IDs route incoming sources'):
         assert text in js

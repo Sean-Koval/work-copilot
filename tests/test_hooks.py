@@ -41,7 +41,7 @@ def test_queue_fifo_survives_restart_and_failure_keeps_pending(tmp_path):
     enqueue_activity(tmp_path, event('1'))
     enqueue_activity(tmp_path, event('2'))
     paths = sorted((tmp_path/'activity-queue').glob('*.event.json'))
-    first = json.loads(paths[0].read_text())
+    first = json.loads(paths[0].read_text(encoding='utf-8'))
     assert first['event']['event_id'] == '1'
     store = Store(tmp_path/'copilot.db')
     outcome = drain_activity(store, tmp_path, {'max_events':1})

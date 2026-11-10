@@ -15,7 +15,7 @@ def test_simultaneous_capture_export_inbox_preserves_manifest(tmp_path):
     with ThreadPoolExecutor(max_workers=8) as pool:
         assert len(list(pool.map(task,range(24))))==24
     export_projects(store,vault)
-    assert 'Handwritten original' in (vault/'daily.md').read_text()
+    assert 'Handwritten original' in (vault/'daily.md').read_text(encoding='utf-8')
     assert (vault/'Work Copilot Generated'/'Review.md').exists()
 
 
@@ -28,5 +28,5 @@ def test_independent_processes_capture_and_export_same_vault(tmp_path):
     for process in processes:
         stdout,stderr=process.communicate(timeout=30)
         assert process.returncode==0,(stdout,stderr)
-    assert 'Original unchanged' in (vault/'daily.md').read_text()
+    assert 'Original unchanged' in (vault/'daily.md').read_text(encoding='utf-8')
     assert (vault/'Work Copilot Generated'/'Review.md').is_file()

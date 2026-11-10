@@ -1,0 +1,43 @@
+# Runs the test suite and the fictional-data smoke check on each OS a work laptop might use.
+# docs/LOCAL_READINESS.md lists macOS and Windows as unverified; this job is the first evidence for them.
+# It never uses real work data, a company server or a model.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.12"]
+        include:
+          - os: ubuntu-latest
+            python: "3.11"
+          - os: ubuntu-latest
+            python: "3.13"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install the pinned test set
+        run: python -m pip install -c constraints.txt -e ".[test]"
+      - name: Tests
+        run: python -m pytest -q
+      - name: Smoke through the POSIX launcher
+        if: runner.os != 'Windows'
+        run: ./run.sh smoke
+      - name: Smoke through the PowerShell launcher
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./run.ps1 smoke

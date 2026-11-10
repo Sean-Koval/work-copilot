@@ -76,7 +76,7 @@ class MCPTests(unittest.TestCase):
                     self.assertIn('revision', hits[0])
                     return obligation['id']
         with TemporaryDirectory() as directory:
-            vault = Path(directory) / 'vault'
+            vault = Path(directory).resolve() / 'vault'
             vault.mkdir()
             obligation_id = asyncio.run(exercise(directory, vault))
             from work_copilot.store import Store

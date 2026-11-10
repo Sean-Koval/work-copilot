@@ -85,7 +85,7 @@ def run_smoke() -> dict:
 
     try:
         with TemporaryDirectory(prefix='work-copilot-smoke-') as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve()  # macOS: /var is a symlink; the vault rule refuses symlinked paths
             data, vault = root/'data', root/'vault'
             data.mkdir(); vault.mkdir()
             try:

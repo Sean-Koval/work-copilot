@@ -201,7 +201,7 @@ def _export_projects_unlocked(store, destination) -> dict:
         raise ValueError('Generated manifest cannot be a symlink')
     owned = []
     if marker.exists():
-        metadata = json.loads(marker.read_text())
+        metadata = json.loads(marker.read_text(encoding='utf-8'))
         if metadata.get('generator') != 'work-copilot-v1':
             raise ValueError('Unrecognized export ownership manifest')
         owned = metadata.get('files', [])
