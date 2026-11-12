@@ -41,3 +41,30 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: ./run.ps1 smoke
+
+  oauth-keychain:
+    # OAuth tokens live only in the OS keychain (KAN-461). macOS and Windows use the real Keychain and
+    # Credential Manager; Linux has no Secret Service on the runner and must refuse without a file fallback.
+    name: OAuth keychain / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            keychain: required
+          - os: windows-latest
+            keychain: required
+          - os: ubuntu-latest
+            keychain: absent
+    env:
+      WORK_COPILOT_OS_KEYCHAIN: ${{ matrix.keychain }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install with the keychain extra
+        run: python -m pip install -c constraints.txt -e ".[test,oauth-keyring]"
+      - name: OAuth storage tests
+        run: python -m pytest -q tests/test_os_keychain.py tests/test_remote_mcp.py tests/test_doctor.py

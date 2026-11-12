@@ -12,7 +12,6 @@ import hashlib
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 import logging
-import os
 from pathlib import Path
 import secrets
 import threading
@@ -42,79 +41,105 @@ class AuthorizationRequired(RuntimeError):
     pass
 
 
-class ProtectedFileStorage:
-    """Explicit POSIX protected-file fallback; unencrypted, never silently selected."""
-    def __init__(self, path):
-        self.path = Path(path)
-        if os.name != 'posix':
-            raise ValueError('Protected-file storage requires POSIX permissions; use keyring on this OS')
-        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        if self.path.parent.is_symlink():
-            raise ValueError('Credential directory cannot be a symlink')
-        os.chmod(self.path.parent, 0o700)
+KEYRING_SERVICE = 'work-copilot'
+_SECURE_BACKENDS = ('keyring.backends.macOS', 'keyring.backends.Windows', 'keyring.backends.SecretService',
+                    'keyring.backends.libsecret', 'keyring.backends.kwallet')
+# Windows Credential Manager caps one secret at 2560 bytes (1280 UTF-16 characters); OAuth tokens and
+# client registrations can exceed that, so long values are split across entries on every OS.
+_CHUNK_CHARS = 1000
+_CHUNK_MANIFEST = 'work-copilot-chunks:v1:'
+_KINDS = ('metadata', 'tokens', 'client')
+PROTECTED_FILE_REMOVED = (
+    'storage "protected-file" was removed: OAuth tokens are kept only in the OS keychain. Set "storage": "keyring", '
+    'install the oauth-keyring extra, delete the old unencrypted token files (oauth/*.json in the data directory), '
+    'then run connect --authorize to sign in again; existing tokens are not migrated')
 
-    def _read(self):
-        if not self.path.exists():
-            return {}
-        if self.path.is_symlink() or self.path.stat().st_mode & 0o077:
-            raise ValueError('Credential file must be private (0600) and not a symlink')
-        return json.loads(self.path.read_text(encoding='utf-8'))
 
-    def _write(self, key, value):
-        payload = self._read()
-        payload[key] = value.model_dump(mode='json')
-        if key == 'tokens':
-            payload['expires_at'] = time.time() + value.expires_in if value.expires_in is not None else None
-        temp = self.path.with_name(self.path.name + '.' + secrets.token_hex(8))
-        fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        try:
-            with os.fdopen(fd, 'w', encoding='utf-8') as out:
-                json.dump(payload, out)
-                out.flush(); os.fsync(out.fileno())
-            os.replace(temp, self.path)
-        finally:
-            temp.unlink(missing_ok=True)
+class KeychainUnavailable(ValueError):
+    """No secure OS keychain backend; there is deliberately no file fallback."""
 
-    async def get_metadata(self):
-        value = self._read().get('metadata')
-        return OAuthMetadata.model_validate(value) if value else None
 
-    async def set_metadata(self, value):
-        self._write('metadata', value)
+def _backend_is_secure(backend):
+    module = type(backend).__module__
+    if module.startswith('keyring.backends.chainer'):
+        children = list(getattr(backend, 'backends', ()))
+        return bool(children) and all(_backend_is_secure(child) for child in children)
+    return module.startswith(_SECURE_BACKENDS)
 
-    async def get_tokens(self):
-        payload = self._read()
-        value = payload.get('tokens')
-        if value and payload.get('expires_at') is not None:
-            value['expires_in'] = max(0, int(payload['expires_at'] - time.time()))
-        return OAuthToken.model_validate(value) if value else None
 
-    async def set_tokens(self, tokens):
-        self._write('tokens', tokens)
+def secure_keyring():
+    """Return the keyring module only when its active backend is an OS keychain.
 
-    async def get_client_info(self):
-        value = self._read().get('client')
-        return OAuthClientInformationFull.model_validate(value) if value else None
-
-    async def set_client_info(self, client_info):
-        self._write('client', client_info)
+    macOS Keychain and Windows Credential Manager are the targets; Linux needs a running
+    Secret Service (GNOME Keyring, KWallet). Plaintext, null and fail backends are refused.
+    """
+    try:
+        import keyring
+    except ImportError:
+        raise KeychainUnavailable('OAuth storage needs the OS keychain: install work-copilot[oauth-keyring]') from None
+    try:
+        backend = keyring.get_keyring()
+    except Exception:  # noqa: BLE001 - any backend load failure means no keychain
+        raise KeychainUnavailable('OS keychain backend could not be loaded; tokens are never written to a file instead') from None
+    if not _backend_is_secure(backend):
+        raise KeychainUnavailable(
+            'No secure OS keychain is available (active keyring backend: ' + type(backend).__module__ + '). '
+            'Use macOS Keychain or Windows Credential Manager; on Linux start an unlocked Secret Service '
+            '(GNOME Keyring or KWallet). Tokens are never written to a file instead')
+    return keyring
 
 
 class KeyringStorage:
-    def __init__(self, identity):
-        try:
-            import keyring
-        except ImportError as exc:
-            raise ValueError('Install work-copilot[oauth-keyring] or explicitly choose protected-file storage') from exc
-        backend = keyring.get_keyring()
-        module = type(backend).__module__
-        if not any(module.startswith(prefix) for prefix in ('keyring.backends.SecretService', 'keyring.backends.macOS', 'keyring.backends.Windows', 'keyring.backends.kwallet', 'keyring.backends.libsecret')):
-            raise ValueError('Configure a secure OS keyring backend explicitly; plaintext/chained/fail backends are not accepted')
-        self.keyring = keyring
+    """OAuth metadata, tokens and client registration in the OS keychain only."""
+    def __init__(self, identity, keyring=None):
+        self.keyring = keyring or secure_keyring()
         self.identity = identity
 
+    def _key(self, kind):
+        return self.identity + ':' + kind
+
+    def _read(self, kind):
+        key = self._key(kind)
+        value = self.keyring.get_password(KEYRING_SERVICE, key)
+        if not value or not value.startswith(_CHUNK_MANIFEST):
+            return value or None
+        parts = [self.keyring.get_password(KEYRING_SERVICE, key + '#' + str(i)) for i in range(int(value[len(_CHUNK_MANIFEST):]))]
+        # An interrupted write leaves an incomplete set; treat it as absent so the user re-authorizes.
+        return None if any(part is None for part in parts) else ''.join(parts)
+
+    def _chunk_count(self, key):
+        value = self.keyring.get_password(KEYRING_SERVICE, key)
+        return int(value[len(_CHUNK_MANIFEST):]) if value and value.startswith(_CHUNK_MANIFEST) else 0
+
+    def _delete(self, key):
+        if self.keyring.get_password(KEYRING_SERVICE, key) is not None:
+            self.keyring.delete_password(KEYRING_SERVICE, key)
+
+    def _write(self, kind, text):
+        key = self._key(kind)
+        old = self._chunk_count(key)
+        if len(text) <= _CHUNK_CHARS and not text.startswith(_CHUNK_MANIFEST):
+            self.keyring.set_password(KEYRING_SERVICE, key, text)
+            new = 0
+        else:
+            parts = [text[i:i + _CHUNK_CHARS] for i in range(0, len(text), _CHUNK_CHARS)]
+            for i, part in enumerate(parts):
+                self.keyring.set_password(KEYRING_SERVICE, key + '#' + str(i), part)
+            self.keyring.set_password(KEYRING_SERVICE, key, _CHUNK_MANIFEST + str(len(parts)))
+            new = len(parts)
+        for i in range(new, old):
+            self._delete(key + '#' + str(i))
+
+    def clear(self):
+        """Remove every entry for this connector identity."""
+        for kind in _KINDS:
+            key = self._key(kind)
+            for i in range(self._chunk_count(key)):
+                self._delete(key + '#' + str(i))
+            self._delete(key)
+
     def _get(self, kind, model):
-        value = self.keyring.get_password('work-copilot', self.identity + ':' + kind)
+        value = self._read(kind)
         if not value: return None
         payload = json.loads(value)
         if kind == 'tokens' and 'token' in payload:
@@ -128,19 +153,19 @@ class KeyringStorage:
         return self._get('metadata', OAuthMetadata)
 
     async def set_metadata(self, value):
-        self.keyring.set_password('work-copilot', self.identity + ':metadata', value.model_dump_json())
+        self._write('metadata', value.model_dump_json())
 
     async def get_tokens(self):
         return self._get('tokens', OAuthToken)
 
     async def set_tokens(self, tokens):
-        self.keyring.set_password('work-copilot', self.identity + ':tokens', json.dumps({'token':tokens.model_dump(mode='json'),'expires_at':time.time()+tokens.expires_in if tokens.expires_in is not None else None}))
+        self._write('tokens', json.dumps({'token':tokens.model_dump(mode='json'),'expires_at':time.time()+tokens.expires_in if tokens.expires_in is not None else None}))
 
     async def get_client_info(self):
         return self._get('client', OAuthClientInformationFull)
 
     async def set_client_info(self, client_info):
-        self.keyring.set_password('work-copilot', self.identity + ':client', client_info.model_dump_json())
+        self._write('client', client_info.model_dump_json())
 
 
 def load_config(path):
@@ -168,8 +193,10 @@ def load_config(path):
         raise ValueError('endpoint requires HTTPS and a host (HTTP allowed only for loopback testing)')
     if endpoint.username or endpoint.password or endpoint.fragment or endpoint.query:
         raise ValueError('endpoint must not contain credentials, query or fragment')
-    if config.get('storage') not in ('keyring', 'protected-file'):
-        raise ValueError('Choose storage explicitly: keyring or protected-file (unencrypted POSIX 0600)')
+    if config.get('storage') == 'protected-file':
+        raise ValueError(PROTECTED_FILE_REMOVED)
+    if config.get('storage') != 'keyring':
+        raise ValueError('storage must be set explicitly to "keyring" (OS keychain)')
     allowed = config.get('allowed_read_tools', [])
     if not isinstance(allowed, list) or any(not isinstance(name, str) or not name.strip() for name in allowed):
         raise ValueError('allowed_read_tools must be a list of nonempty tool-name strings')
@@ -302,8 +329,7 @@ class _ExplicitGrantProvider(OAuthClientProvider):
 @asynccontextmanager
 async def remote_session(config, data_dir, authorize=False):
     identity = _identity(config, data_dir)
-    storage = (KeyringStorage(identity) if config['storage'] == 'keyring'
-               else ProtectedFileStorage(Path(data_dir) / 'oauth' / (identity + '.json')))
+    storage = KeyringStorage(identity)
     if not authorize and not await storage.get_tokens():
         raise AuthorizationRequired('Run connect --authorize to grant OAuth locally')
     # Pre-registered public-client deployments can provide client_id without secrets.

@@ -22,7 +22,7 @@ def test_doctor_config_error_actionable_and_nonmutating(tmp_path):
     import json
     store=Store(tmp_path/'copilot.db')
     config=tmp_path/'remote.json'
-    config.write_text(json.dumps({'endpoint':'https://example.invalid/mcp','storage':'protected-file','max_pages':'secret-invalid-number'}))
+    config.write_text(json.dumps({'endpoint':'https://example.invalid/mcp','storage':'keyring','max_pages':'secret-invalid-number'}))
     before={p.name:p.read_bytes() for p in tmp_path.iterdir() if p.is_file()}
     result=diagnose(store,tmp_path,config=config)
     assert result['checks']['connector']['status']=='invalid_config'
@@ -42,8 +42,26 @@ def test_doctor_keyring_inspection_never_reads_credentials(tmp_path, monkeypatch
     monkeypatch.setitem(sys.modules,'keyring',fake)
     result=diagnose(store,tmp_path,config=config)
     assert result['checks']['oauth_storage']['ok'] is False
-    assert 'secure OS' in result['checks']['oauth_storage']['note']
+    assert 'Secret Service' in result['checks']['oauth_storage']['note']
     assert not (tmp_path/'oauth').exists()
+
+
+def test_doctor_flags_leftover_protected_file_tokens_without_reading(tmp_path, fake_keyring):
+    import json
+    store=Store(tmp_path/'copilot.db');config=tmp_path/'remote.json'
+    config.write_text(json.dumps({'endpoint':'https://example.invalid/mcp','storage':'keyring'}))
+    (tmp_path/'oauth').mkdir();(tmp_path/'oauth'/'old.json').write_text('{"tokens":{"access_token":"fictional-old"}}')
+    result=diagnose(store,tmp_path,config=config)['checks']['oauth_storage']
+    assert result['ok'] is False and result['legacy_token_files']==1
+    assert 'connect --authorize' in result['note'] and 'fictional-old' not in str(result)
+
+
+def test_doctor_reports_protected_file_migration(tmp_path):
+    import json
+    store=Store(tmp_path/'copilot.db');config=tmp_path/'remote.json'
+    config.write_text(json.dumps({'endpoint':'https://example.invalid/mcp','storage':'protected-file'}))
+    connector=diagnose(store,tmp_path,config=config)['checks']['connector']
+    assert connector['status']=='invalid_config' and 'connect --authorize' in connector['note']
 
 
 def test_doctor_path_missing_creates_nothing(tmp_path):
