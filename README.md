@@ -89,7 +89,7 @@ python3 -m venv .venv
 
 Dependencies are pinned; `constraints.txt` records the tested set. Launchers install initially or after a dependency change, rather than running pip on every unchanged launch.
 
-The current local-readiness validation has **140 passing tests** (the original MVP record had 79), actual local SDK client/server tests, fake-server OAuth tests, and fresh-install/HTTP restart checks. It does **not** include successful browser visual QA, a real model-agent session, or your company server. [Validation details](docs/VALIDATION.md) separate executed checks from blocked/unverified checks. [Local readiness](docs/LOCAL_READINESS.md) defines the remaining acceptance gates without claiming a “1.0” release.
+The current local-readiness validation has **165 passing tests** (the original MVP record had 79), actual local SDK client/server tests, fake-server OAuth tests, and fresh-install/HTTP restart checks. It does **not** include successful browser visual QA, a real model-agent session, or your company server. [Validation details](docs/VALIDATION.md) separate executed checks from blocked/unverified checks. [Local readiness](docs/LOCAL_READINESS.md) defines the remaining acceptance gates without claiming a “1.0” release.
 
 The [architecture proposal](docs/ARCHITECTURE.md) describes longer-term possibilities; hosted deployment and external actions there are not current features.
 

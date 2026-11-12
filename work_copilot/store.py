@@ -12,6 +12,7 @@ from uuid import uuid4
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from filelock import FileLock
+from .knowledge import ENVELOPE_VERSION, validate_envelope
 
 
 class ConflictError(ValueError):
@@ -246,11 +247,14 @@ class Store:
         result={'inserted':0,'updated':0,'unchanged':0}
         with self._transaction():
             for item in records:
-                if not isinstance(item,dict) or not all(isinstance(item.get(k),str) and item[k] for k in ('id','revision','provider','title')) or not isinstance(item.get('body'),str):
-                    raise ValueError('Source requires string id, revision, provider, title and body')
+                if not isinstance(item,dict):
+                    raise ValueError('Source envelope must be an object')
                 source=dict(item)
+                source.setdefault('schema_version',ENVELOPE_VERSION)
                 source.setdefault('observed_at',self.now().isoformat())
-                _instant(source['observed_at'])
+                # The shared Source contract (schema_version 1) covers id, revision,
+                # provider, title, body, observed_at, obligations and url.
+                validate_envelope(source)
                 source.setdefault('projects',[])
                 source.setdefault('obligations',[])
                 source.setdefault('deleted',False)
@@ -261,7 +265,8 @@ class Store:
                 prior=self.db.execute('SELECT payload FROM source_revisions WHERE id=? AND revision=?',(source['id'],source['revision'])).fetchone()
                 if prior:
                     # Observation time may differ on replay; content cannot.
-                    meaningful=lambda value: {k:v for k,v in value.items() if k!='observed_at'}
+                    # Payloads stored before schema_version existed are version 1.
+                    meaningful=lambda value: {k:v for k,v in value.items() if k not in ('observed_at','schema_version')}
                     if meaningful(json.loads(prior[0])) != meaningful(source):
                         raise ValueError('Source revision collision: payload changed without a new revision')
                     # Seen historical revisions are replay, not newer evidence.
@@ -283,8 +288,6 @@ class Store:
                         self.db.execute('INSERT OR IGNORE INTO projects VALUES(?,?)',(project['id'],project.get('name',project['id'])))
                         self.db.execute('INSERT OR IGNORE INTO source_projects VALUES(?,?,?)',(source['id'],project['id'],project.get('workstream','')))
                     for candidate in source['obligations']:
-                        if not isinstance(candidate,dict) or not candidate.get('intent_key') or not candidate.get('title'):
-                            raise ValueError('Obligations require intent_key and title')
                         canonical=_json([candidate.get('project_id'),candidate['intent_key']])
                         existing_row=self.db.execute('SELECT obligation_id FROM source_intents WHERE source_id=? AND candidate_key=?',(source['id'],canonical)).fetchone()
                         if not existing_row:

@@ -1,0 +1,2 @@
+Agreed: ticket titles start with the repository name and a colon.
+Thanks all.
