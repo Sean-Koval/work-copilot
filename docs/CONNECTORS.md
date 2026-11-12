@@ -40,9 +40,12 @@ The app exports only to `Work Copilot Generated/` inside the selected destinatio
 
 JSON imports are a list of the following objects. A live adapter must map its **verified** schema into these objects; a provider name does not establish API support.
 
+The envelope is versioned: `schema_version` is `1`, and a missing value is read as `1`. `Store.ingest` validates `id`, `revision`, `provider`, `title`, `body`, `observed_at`, `obligations` and `url` against the shared Source contract (ai-dlc `contracts/knowledge-record.schema.json`) and rejects any other version. The other fields below are Work Copilot extensions and are never exported.
+
 ```json
 [
   {
+    "schema_version": 1,
     "id": "example:tenant:message:42",
     "revision": "provider-revision-2",
     "provider": "example",
@@ -71,6 +74,21 @@ A connector capability/config record should state:
 
 Commit received records and their checkpoint atomically. Persist gaps/errors; do not claim complete coverage after a failed page. A timeout on a hypothetical external send would be an **unknown outcome**, never a reason to retry blindly. This MVP has no external send executor.
 
+## Export to a knowledge repository inbox
+
+`work-copilot export --since <timestamp> --to <knowledge repo> --owner <login>` writes captured sources into `<knowledge repo>/inbox/` as Source records (record format version 1). `--to` and `--owner` default to `WORK_COPILOT_KNOWLEDGE_REPO` and `WORK_COPILOT_KNOWLEDGE_OWNER`; `--scope` defaults to `personal`. The path must be an existing local directory without symlinks. Export never commits, pushes or calls an external system.
+
+Each source gives two new files:
+
+- The raw payload (transcript, thread or marked note lines) goes to `inbox/raw/sha256-<hex>.txt`, named by its sha256, so identical payloads are stored once.
+- A Source record, `inbox/<id>--<envelope hash>.md`. Its `id` is a stable slug per source, and the source revision is in `revision`. It holds the metadata, `sources[{id, resource, hash}]` pointing at the raw payload, and a short extract as summary.
+
+Inbox items are candidates for 30 days, marked by `stale_after`. Retention and numbering belong to the knowledge repository's workflow. Export never edits or deletes a file it did not just create.
+
+Export is idempotent. De-duplication hashes the whole exported envelope except `revision`, so an envelope already in the inbox is not written again under a new revision. A changed obligation needs a new revision and gives a new record. Deleted (tombstoned) sources and user-entered `local-user` obligations are not exported.
+
+From the selected vault, only lines starting with `>>` are exported. They form one Source per day: the date in the note's file name, else the capture date. Unmarked lines never leave the vault.
+
 ## Shared MCP server
 
 After installing the project, configure your agent's MCP client to execute the installed `work-copilot mcp` command with the same `--data-dir` used by the dashboard. Consult `work-copilot --help` for flag order. Alternatively invoke:
@@ -79,9 +97,11 @@ After installing the project, configure your agent's MCP client to execute the i
 /path/to/.venv/bin/python -m work_copilot.mcp_server --data-dir /absolute/private/data-directory
 ```
 
-Read-only tools: `get_attention`, `get_project(project_id)`, `get_reply_context(obligation_id)`, and `search_context(query, project_id?, workstream?, provider?, since?, until?, limit?)` return observed source passages and revision citations. Search is local full-text retrieval, not semantic interpretation.
+The server registers eleven tools: five read-only, five local-write, and `capture_note` when a vault is configured.
 
-Explicit local-write tools: `create_project(id, name, aliases?, rooms?)`, `track_obligation(payload)` and `review_obligation(obligation_id, revision, changes)` manage local operational records only. Start by creating stable projects with explicit aliases and room IDs; one room may belong to multiple projects. No remote discovery or connection happens when creating this metadata. Configure `WORK_COPILOT_VAULT=/absolute/selected/vault` in your MCP client's environment to additionally expose `capture_note(title, body, project_id?, project_ids?, workstream?)`. Without that explicit setting, the capture tool is absent. Optional project/workstream selections write explicit frontmatter, so ordinary pasted text needs no hand-written JSON. Existing pasted frontmatter stays first and retains its structured actions. Capture creates a new Inbox note and returns source/obligation IDs; it never rewrites an original. Read/write SDK annotations reflect these differences.
+Read-only tools: `get_attention`, `get_project(project_id)`, `get_source(source_id, offset?, max_chars?)`, `get_reply_context(obligation_id)`, and `search_context(query, project_id?, workstream?, provider?, since?, until?, limit?)` return observed source passages and revision citations. Search is local full-text retrieval, not semantic interpretation.
+
+Explicit local-write tools: `create_project(id, name, aliases?, rooms?)`, `track_obligation(payload)`, `review_obligation(obligation_id, revision, changes)`, `update_project(project_id, revision, changes)` and `set_priorities(ids, revision)` manage local operational records only. `payload` and both `changes` arguments have typed input schemas, so a client can discover their fields; unknown fields are rejected. Start by creating stable projects with explicit aliases and room IDs; one room may belong to multiple projects. No remote discovery or connection happens when creating this metadata. Configure `WORK_COPILOT_VAULT=/absolute/selected/vault` in your MCP client's environment to additionally expose `capture_note(title, body, project_id?, project_ids?, workstream?)`. Without that explicit setting, the capture tool is absent. Optional project/workstream selections write explicit frontmatter, so ordinary pasted text needs no hand-written JSON. Existing pasted frontmatter stays first and retains its structured actions. Capture creates a new Inbox note and returns source/obligation IDs; it never rewrites an original. Read/write SDK annotations reflect these differences.
 
 For “Waiting on Alex for the Atlas transcript; follow up tomorrow,” your agent resolves the actual project ID and date, then submits structured data such as:
 

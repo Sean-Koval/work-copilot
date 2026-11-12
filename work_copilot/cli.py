@@ -32,8 +32,14 @@ def _run():
             p.add_argument('--connector-config',type=Path,help='Explicit configured OAuth MCP collector; never opens OAuth automatically')
             p.add_argument('--port',type=int,default=8765)
             p.add_argument('--vault',type=Path,help='Explicitly selected approved Markdown folder')
-        elif name in {'capture','export'}:
+        elif name=='capture':
             p.add_argument('vault',type=Path)
+        elif name=='export':
+            p.add_argument('vault',type=Path,nargs='?',help='Regenerate the project wiki in this vault (omit with --to)')
+            p.add_argument('--to',type=Path,default=os.environ.get('WORK_COPILOT_KNOWLEDGE_REPO'),help='Local knowledge repository; Source records go to its inbox/. Default: WORK_COPILOT_KNOWLEDGE_REPO')
+            p.add_argument('--since',help='Export sources observed at or after this ISO timestamp with timezone')
+            p.add_argument('--owner',default=os.environ.get('WORK_COPILOT_KNOWLEDGE_OWNER'),help='Record owner. Default: WORK_COPILOT_KNOWLEDGE_OWNER')
+            p.add_argument('--scope',default='personal',choices=['personal','project','team'])
         elif name=='import':
             p.add_argument('file',type=Path,help='Normalized JSON envelope or source array')
         elif name in {'connect','collect'}:
@@ -110,6 +116,11 @@ def _run():
             from .vault import capture_vault, export_projects
             result=capture_vault(store,args.vault)
             result['export']=export_projects(store,args.vault)
+        elif args.command=='export' and args.vault is None:
+            if args.to is None:
+                raise ValueError('Give a vault for the project wiki, or --to <knowledge repo> for Source records')
+            from .knowledge import export_sources
+            result=export_sources(store,args.to,owner=args.owner,since=args.since,scope=args.scope)
         elif args.command=='export':
             from .vault import export_projects
             result=export_projects(store,args.vault)

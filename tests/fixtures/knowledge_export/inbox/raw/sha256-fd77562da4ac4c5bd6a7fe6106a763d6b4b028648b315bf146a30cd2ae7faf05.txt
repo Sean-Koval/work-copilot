@@ -1,0 +1,2 @@
+Pin the harness by digest.
+Ask about release notes

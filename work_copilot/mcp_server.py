@@ -5,9 +5,67 @@ import argparse
 import json
 import os
 from pathlib import Path
+from typing import Literal
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
+from pydantic import BaseModel, ConfigDict, Field
+
+ObligationStatus = Literal['candidate', 'open', 'waiting', 'resolved', 'dismissed']
+QuestionState = Literal['pending', 'sent', 'answered']
+
+
+class ObligationInput(BaseModel):
+    """A local follow-up to record. Omitted fields keep the store's defaults."""
+
+    model_config = ConfigDict(extra='forbid')
+    intent_key: str = Field(min_length=1, description='Stable key; (project_id, intent_key) is the identity')
+    title: str = Field(min_length=1)
+    project_id: str | None = None
+    owner: str | None = Field(default=None, description="'me' only with explicit evidence; default 'me'")
+    status: ObligationStatus | None = Field(default=None, description="Default 'waiting'")
+    waiting_on: str | None = None
+    follow_up_at: str | None = Field(default=None, description='Personal reminder, ISO date or datetime')
+    due_at: str | None = Field(default=None, description='Promised deadline, ISO date or datetime')
+    question_state: QuestionState | None = None
+    commitment: bool | None = None
+    evidence_ids: list[str] | None = Field(default=None, description='Existing source IDs')
+    body: str | None = Field(default=None, max_length=100000)
+
+
+class ObligationChanges(BaseModel):
+    """Fields to correct on an obligation; give only the ones that change."""
+
+    model_config = ConfigDict(extra='forbid')
+    owner: str | None = None
+    status: ObligationStatus | None = None
+    question_state: QuestionState | None = None
+    due_at: str | None = None
+    follow_up_at: str | None = None
+    commitment: bool | None = None
+    project_id: str | None = None
+    title: str | None = None
+    waiting_on: str | None = None
+
+
+class Room(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    id: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+
+
+class ProjectChanges(BaseModel):
+    """Project fields to edit; give only the ones that change."""
+
+    model_config = ConfigDict(extra='forbid')
+    name: str | None = None
+    aliases: list[str] | None = None
+    rooms: list[Room] | None = None
+
+
+def _given(model: BaseModel) -> dict:
+    # Only the fields the caller sent, so an explicit null still reaches the store.
+    return model.model_dump(exclude_unset=True)
 
 
 def _encode(value, **kwargs):
@@ -120,21 +178,19 @@ def build_server(data_dir) -> FastMCP:
         return _encode(store.create_project(id, name, aliases=aliases, rooms=rooms), ensure_ascii=False)
 
     @server.tool(annotations=local_write)
-    def track_obligation(payload: dict) -> str:
-        """Record an explicitly requested local follow-up. Required: intent_key,title. Optional: project_id,owner,status,waiting_on,follow_up_at,due_at,question_state,commitment,evidence_ids. Follow-up reminder is not a promised deadline. Never sends externally."""
-        return _encode(_brief_obligation(store.track_obligation(payload)), ensure_ascii=False)
+    def track_obligation(payload: ObligationInput) -> str:
+        """Record an explicitly requested local follow-up. Follow-up reminder is not a promised deadline. Never sends externally."""
+        return _encode(_brief_obligation(store.track_obligation(_given(payload))), ensure_ascii=False)
 
     @server.tool(annotations=local_write)
-    def review_obligation(obligation_id: str, revision: int, changes: dict) -> str:
+    def review_obligation(obligation_id: str, revision: int, changes: ObligationChanges) -> str:
         """Correct local ownership, mapping or status with an optimistic revision. Does not approve a draft or perform an external action."""
-        return _encode(_brief_obligation(store.review(obligation_id, revision, changes)), ensure_ascii=False)
+        return _encode(_brief_obligation(store.review(obligation_id, revision, _given(changes))), ensure_ascii=False)
 
     @server.tool(annotations=local_write)
-    def update_project(project_id: str, revision: int, changes: dict) -> str:
+    def update_project(project_id: str, revision: int, changes: ProjectChanges) -> str:
         """Edit local project name, aliases and exact room bindings with config_revision; no remote action."""
-        if set(changes)-{'name','aliases','rooms'}:
-            raise ValueError('Only name, aliases and rooms can be edited')
-        project=store.update_project(project_id,revision,**changes)
+        project=store.update_project(project_id,revision,**_given(changes))
         return _encode({k:project.get(k) for k in ('id','name','config_revision')})
 
     @server.tool(annotations=local_write)

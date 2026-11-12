@@ -1,0 +1,3 @@
+# Exported fixtures are compared byte for byte; never convert their line endings.
+tests/fixtures/knowledge_export/** -text
+tests/contracts/** -text
