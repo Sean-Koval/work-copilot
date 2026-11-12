@@ -91,6 +91,8 @@ def test_exported_records_match_the_contract_and_fixtures(store, repo):
     for path in records:
         assert record_errors(path) == []
         assert re.fullmatch(r'[a-z0-9-]+--[0-9a-f]{16}\.md', path.name)
+        front = parse_frontmatter(path.read_text(encoding='utf-8'))
+        assert path.name.startswith(front['id'] + '--') and front['revision']
     exported = {p.relative_to(repo).as_posix(): p.read_bytes() for p in inbox_files(repo)}
     committed = {p.relative_to(FIXTURES).as_posix(): p.read_bytes() for p in FIXTURES.rglob('*') if p.is_file()}
     assert exported == committed
@@ -112,42 +114,62 @@ def test_record_points_at_raw_payload_by_sha256(store, repo):
         assert raw['hash'] == 'sha256:' + hashlib.sha256(payload).hexdigest()
         assert front['status'] == 'raw' and front['schema_version'] == 1
         assert front['stale_after'] == '2026-12-12T18:00:00Z'
-        assert 'file://' not in path.read_text(encoding='utf-8')
+        text = path.read_text(encoding='utf-8')
+        assert 'file://' not in text and 'permanent' not in text
 
 
 def test_second_export_writes_nothing(store, repo):
     export_sources(store, repo, owner='sean', now=NOW)
     before = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in inbox_files(repo)}
-    again = export_sources(store, repo, owner='sean', now=NOW + timedelta(hours=1))
-    assert again['written'] == [] and again['raw_written'] == [] and again['expired'] == []
+    again = export_sources(store, repo, owner='sean', now=NOW + timedelta(days=40))
+    assert again['written'] == [] and again['raw_written'] == []
     assert len(again['unchanged']) == 3
     assert {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in inbox_files(repo)} == before
 
 
-def test_new_revision_is_a_new_record_and_tombstones_are_not_exported(store, repo):
+def test_ids_are_stable_and_existing_files_are_never_touched(store, repo):
     export_sources(store, repo, owner='sean', now=NOW)
+    before = {p: p.read_bytes() for p in inbox_files(repo)}
     store.ingest([dict(SOURCES[0], revision='4', body='Revised thread.', observed_at='2026-11-11T10:00:00+00:00')])
     store.ingest([dict(SOURCES[1], revision='2', deleted=True, body='', obligations=[], observed_at='2026-11-11T10:00:00+00:00')])
-    result = export_sources(store, repo, owner='sean', now=NOW)
+    result = export_sources(store, repo, owner='sean', now=NOW + timedelta(days=40))
     assert len(result['written']) == 1
-    providers = [parse_frontmatter((repo / 'inbox' / name).read_text(encoding='utf-8'))['provider'] for name in result['written']]
-    assert providers == ['symphony']
-    ids = [parse_frontmatter(p.read_text(encoding='utf-8'))['id'] for p in (repo / 'inbox').glob('*.md')]
-    assert len(ids) == len(set(ids)) == 4
+    new = parse_frontmatter((repo / 'inbox' / result['written'][0]).read_text(encoding='utf-8'))
+    old = next(parse_frontmatter(p.read_text(encoding='utf-8')) for p in before
+               if p.suffix == '.md' and p.name.startswith('symphony-'))
+    assert new['provider'] == 'symphony' and new['id'] == old['id']
+    assert (new['revision'], old['revision']) == ('4', '3')
+    assert all(p.read_bytes() == data for p, data in before.items())
 
 
-def test_sha256_deduplicates_payloads_and_records(store, repo):
-    # Same payload under another title: a second record, one raw file.
-    store.ingest([dict(SOURCES[0], id='symphony:tenant:thread:43', title='Forwarded thread', url=None)])
+def test_dedupe_hashes_the_envelope_without_revision(store, repo):
     export_sources(store, repo, owner='sean', now=NOW)
-    assert len(list((repo / 'inbox').glob('*.md'))) == 4
-    assert len(list((repo / 'inbox' / 'raw').glob('*.txt'))) == 3
-    # Same title and payload, even under a new revision or id: not a new record.
-    store.ingest([dict(SOURCES[0], revision='5', observed_at='2026-11-11T00:00:00+00:00'),
-                  dict(SOURCES[0], id='symphony:tenant:thread:45', url=None)])
+    # Same envelope under a new revision: not a new record.
+    store.ingest([dict(SOURCES[0], revision='5')])
+    assert export_sources(store, repo, owner='sean', now=NOW)['written'] == []
+    # A changed obligation needs a new revision, and gives a new record.
+    changed = [{'intent_key': 'rename-tickets', 'title': 'Rename open tickets', 'status': 'open'}]
+    with pytest.raises(ValueError, match='revision'):
+        store.ingest([dict(SOURCES[0], revision='5', obligations=changed)])
+    store.ingest([dict(SOURCES[0], revision='6', obligations=changed)])
     result = export_sources(store, repo, owner='sean', now=NOW)
-    assert result['written'] == [] and len(result['duplicates']) == 2
-    assert len(list((repo / 'inbox').glob('*.md'))) == 4
+    assert len(result['written']) == 1 and result['raw_written'] == []
+    # Same body under another id: a second record that shares one raw file.
+    store.ingest([dict(SOURCES[0], id='symphony:tenant:thread:43', url=None)])
+    assert len(export_sources(store, repo, owner='sean', now=NOW)['written']) == 1
+    assert len(list((repo / 'inbox').glob('*.md'))) == 5
+    assert len(list((repo / 'inbox' / 'raw').glob('*.txt'))) == 3
+
+
+def test_a_tampered_raw_payload_is_not_overwritten(store, repo):
+    export_sources(store, repo, owner='sean', now=NOW)
+    raw = sorted((repo / 'inbox' / 'raw').glob('*.txt'))[0]
+    raw.write_bytes(b'edited')
+    for path in (repo / 'inbox').glob('*.md'):
+        path.rename(path.with_suffix('.moved'))
+    with pytest.raises(ValueError, match='not overwriting'):
+        export_sources(store, repo, owner='sean', now=NOW)
+    assert raw.read_bytes() == b'edited'
 
 
 def test_since_limits_the_export(store, repo):
@@ -156,24 +178,6 @@ def test_since_limits_the_export(store, repo):
     assert providers == ['notes', 'zoom']
     with pytest.raises(ValueError):
         export_sources(store, repo, owner='sean', since='2026-11-10', now=NOW)
-
-
-def test_raw_payloads_expire_and_records_stay(store, repo):
-    export_sources(store, repo, owner='sean', now=NOW)
-    later = NOW + timedelta(days=31)
-    store.ingest([dict(SOURCES[0], id='symphony:tenant:thread:44', title='Thread follow-up', url=None, observed_at='2026-12-13T09:00:00+00:00')])
-    result = export_sources(store, repo, owner='sean', now=later)
-    assert len(result['expired']) == 3
-    # Expiry runs first; the new record then writes the payload it shares again.
-    assert len(result['removed_raw']) == 3
-    records = sorted((repo / 'inbox').glob('*.md'))
-    assert len(records) == 4
-    statuses = sorted(parse_frontmatter(p.read_text(encoding='utf-8'))['status'] for p in records)
-    assert statuses == ['expired', 'expired', 'expired', 'raw']
-    for path in records:
-        assert record_errors(path) == []
-    assert len(list((repo / 'inbox' / 'raw').glob('*.txt'))) == 1
-    assert export_sources(store, repo, owner='sean', now=later)['written'] == []
 
 
 def test_unmarked_note_lines_never_leave_the_vault(tmp_path, repo):

@@ -78,12 +78,14 @@ Commit received records and their checkpoint atomically. Persist gaps/errors; do
 
 `work-copilot export --since <timestamp> --to <knowledge repo> --owner <login>` writes captured sources into `<knowledge repo>/inbox/` as Source records (record format version 1). `--to` and `--owner` default to `WORK_COPILOT_KNOWLEDGE_REPO` and `WORK_COPILOT_KNOWLEDGE_OWNER`; `--scope` defaults to `personal`. The path must be an existing local directory without symlinks. Export never commits, pushes or calls an external system.
 
-Each source gives two files:
+Each source gives two new files:
 
-- The raw payload (transcript, thread or marked note lines) goes to `inbox/raw/sha256-<hex>.txt`, named by its sha256, so identical payloads are stored once. It expires 30 days after export.
-- A permanent Source record, `inbox/<record id>.md`. The id is built from the source id and revision. The record holds the metadata, `sources[{id, resource, hash}]` pointing at the raw payload, and a short extract as summary. `stale_after` is the expiry date.
+- The raw payload (transcript, thread or marked note lines) goes to `inbox/raw/sha256-<hex>.txt`, named by its sha256, so identical payloads are stored once.
+- A Source record, `inbox/<id>--<envelope hash>.md`. Its `id` is a stable slug per source, and the source revision is in `revision`. It holds the metadata, `sources[{id, resource, hash}]` pointing at the raw payload, and a short extract as summary.
 
-Export is idempotent. An existing id and revision is not rewritten. A source with the same title and payload sha256 as an exported record is reported as a duplicate, not written. Deleted (tombstoned) sources and user-entered `local-user` obligations are not exported. Each run first marks records past `stale_after` as `expired` and deletes raw payloads that no live record cites.
+Inbox items are candidates for 30 days, marked by `stale_after`. Retention and numbering belong to the knowledge repository's workflow. Export never edits or deletes a file it did not just create.
+
+Export is idempotent. De-duplication hashes the whole exported envelope except `revision`, so an envelope already in the inbox is not written again under a new revision. A changed obligation needs a new revision and gives a new record. Deleted (tombstoned) sources and user-entered `local-user` obligations are not exported.
 
 From the selected vault, only lines starting with `>>` are exported. They form one Source per day: the date in the note's file name, else the capture date. Unmarked lines never leave the vault.
 

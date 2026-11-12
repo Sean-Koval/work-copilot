@@ -6,13 +6,17 @@ Copilot does not import ai-dlc; ``tests/test_knowledge.py`` checks exports again
 vendored copy of that schema.
 
 Export writes only below ``<knowledge repo>/inbox/`` on the local disk. It never
-pushes, sends or calls an external system. Per source it writes two files:
+pushes, sends or calls an external system, and it never edits or deletes a file it
+did not just create. Per source it writes two new files:
 
 * the raw payload (transcript, thread or marked note lines) to
   ``inbox/raw/sha256-<hex>.txt``, named by its sha256 so identical payloads are
-  stored once. Raw payloads expire after :data:`RAW_RETENTION`.
-* a permanent Source record ``inbox/<id>--<revision>.md``: metadata,
+  stored once.
+* a Source record ``inbox/<id>--<envelope hash>.md``: metadata, the ``revision``,
   ``sources[{id, resource, hash}]`` pointing at the raw payload, and a short summary.
+
+Inbox items are candidates for 30 days (``stale_after``). Retention, numbering and
+promotion belong to the knowledge repository's own workflow.
 """
 from __future__ import annotations
 
@@ -38,8 +42,8 @@ ENVELOPE_VERSION = 1
 """``schema_version`` of the source envelope (ai-dlc ``ENVELOPE_VERSION``)."""
 RECORD_FORMAT_VERSION = 1
 """Knowledge record format this export writes (ai-dlc ``FORMAT_VERSION``)."""
-RAW_RETENTION = timedelta(days=30)
-"""Raw payloads expire this long after export; the Source record stays."""
+CANDIDATE_WINDOW = timedelta(days=30)
+"""How long an inbox item stays a candidate; written as ``stale_after``."""
 OBLIGATION_STATUSES = ('candidate', 'open', 'waiting', 'resolved', 'dismissed')
 SCOPES = ('personal', 'project', 'team')
 # Synthesized from user input, not captured content.
@@ -47,7 +51,6 @@ _NOT_CAPTURED = {'local-user'}
 _MARK = '>>'
 _SUMMARY_LINES = 3
 _SUMMARY_CHARS = 400
-_RAW_NAME = re.compile(r'^sha256-[0-9a-f]{64}\.txt$')
 _DAY = re.compile(r'^(\d{4}-\d{2}-\d{2})')
 _LINE_LABEL = re.compile(r'^L\d+: ')
 
@@ -123,14 +126,37 @@ def _slug(text: str) -> str:
     return re.sub(r'[^a-z0-9]+', '-', text.lower()).strip('-')[:32] or 'source'
 
 
-def record_id(source_id: str, provider: str, revision: str) -> str:
-    """Draft slug from source id and revision; record ids are unique per revision."""
-    return f'{_slug(provider)}-{_sha256(source_id.encode())[:16]}--{_sha256(revision.encode())[:16]}'
+def record_id(source_id: str, provider: str) -> str:
+    """A stable draft slug for one source; the revision is a separate field."""
+    return f'{_slug(provider)}-{_sha256(source_id.encode())[:16]}'
 
 
-def record_name(source_id: str, provider: str, revision: str) -> str:
-    """File name: the record id, safe on Windows and macOS."""
-    return record_id(source_id, provider, revision) + '.md'
+def contract_envelope(source: dict) -> dict:
+    """The envelope fields a Source record carries, without ``revision``."""
+    obligations = []
+    for item in source.get('obligations') or []:
+        entry = {'intent_key': item['intent_key'], 'title': item['title']}
+        if item.get('status') in OBLIGATION_STATUSES:
+            entry['status'] = item['status']
+        obligations.append(entry)
+    envelope = {'schema_version': ENVELOPE_VERSION, 'id': source['id'], 'provider': source['provider'],
+                'title': source['title'], 'body': source['body'],
+                'observed_at': _instant(source['observed_at']).isoformat(), 'obligations': obligations}
+    url = source.get('url')
+    if isinstance(url, str) and url.startswith(('https://', 'http://')):
+        envelope['url'] = url
+    return envelope
+
+
+def envelope_hash(source: dict) -> str:
+    """sha256 of the whole exported envelope except ``revision``; the de-duplication key."""
+    canonical = json.dumps(contract_envelope(source), sort_keys=True, ensure_ascii=False, separators=(',', ':'))
+    return _sha256(canonical.encode('utf-8'))
+
+
+def record_name(source: dict) -> str:
+    """File name: stable id plus envelope hash, safe on Windows and macOS."""
+    return f"{record_id(source['id'], source['provider'])}--{envelope_hash(source)[:16]}.md"
 
 
 def summary(body: str) -> str:
@@ -169,25 +195,19 @@ def parse_frontmatter(text: str) -> dict | None:
     return None
 
 
-def build_record(envelope: dict, *, owner: str, scope: str, day: str, raw_resource: str,
+def build_record(source: dict, *, owner: str, scope: str, day: str, raw_resource: str,
                  raw_hash: str, exported_at: datetime, extra_sources=()) -> str:
-    """Render one Source record (frontmatter and summary body) for an envelope."""
-    observed = _instant(envelope['observed_at']).isoformat()
-    obligations = []
-    for item in envelope.get('obligations') or []:
-        entry = {'intent_key': item['intent_key'], 'title': item['title']}
-        if item.get('status') in OBLIGATION_STATUSES:
-            entry['status'] = item['status']
-        obligations.append(entry)
+    """Render one Source record (frontmatter and summary body) for a source."""
+    envelope = contract_envelope(source)
     projects = []
-    for project in envelope.get('projects') or []:
+    for project in source.get('projects') or []:
         target = project.get('id') if isinstance(project, dict) else None
         if isinstance(target, str) and target and target not in projects:
             projects.append(target)
-    expires = (exported_at + RAW_RETENTION).astimezone(timezone.utc)
+    stale = (exported_at + CANDIDATE_WINDOW).astimezone(timezone.utc)
     excerpt = summary(envelope['body'])
     fields = {
-        'id': record_id(envelope['id'], envelope['provider'], envelope['revision']),
+        'id': record_id(envelope['id'], envelope['provider']),
         'type': 'source',
         'scope': scope,
         'status': 'raw',
@@ -197,22 +217,21 @@ def build_record(envelope: dict, *, owner: str, scope: str, day: str, raw_resour
                     *extra_sources],
         'links': [{'type': 'belongs_to', 'target': target} for target in projects],
         'title': envelope['title'],
-        'stale_after': expires.isoformat().replace('+00:00', 'Z'),
+        'stale_after': stale.isoformat().replace('+00:00', 'Z'),
         'schema_version': ENVELOPE_VERSION,
-        'revision': envelope['revision'],
+        'revision': source['revision'],
         'provider': envelope['provider'],
-        'observed_at': observed,
-        'obligations': obligations,
+        'observed_at': envelope['observed_at'],
+        'obligations': envelope['obligations'],
     }
     if excerpt:
         fields['description'] = excerpt.splitlines()[0][:200]
-    url = envelope.get('url')
-    if isinstance(url, str) and url.startswith(('https://', 'http://')):
-        fields['url'] = url
+    if 'url' in envelope:
+        fields['url'] = envelope['url']
     body = [f"# {' '.join(envelope['title'].split())}", '']
     if excerpt:
         body += [excerpt, '']
-    body += [f'Raw payload: `{raw_resource}` until {expires.date().isoformat()}; this record stays.', '']
+    body += [f'Raw payload: `{raw_resource}`. Inbox candidate until {stale.date().isoformat()}.', '']
     return render_frontmatter(fields) + '\n'.join(body)
 
 
@@ -252,10 +271,10 @@ def marked_note_envelopes(store, vault_sources) -> list[tuple[dict, list[dict]]]
     for day, notes in sorted(days.items()):
         body = '\n'.join(line for _source, lines in notes for line in lines) + '\n'
         observed = max((_instant(s['observed_at']) for s, _lines in notes)).isoformat()
-        envelope = {'schema_version': ENVELOPE_VERSION, 'id': f'notes:{day}',
-                    'revision': 'sha256:' + _sha256(body.encode()), 'provider': 'notes',
+        envelope = {'schema_version': ENVELOPE_VERSION, 'id': f'notes:{day}', 'provider': 'notes',
                     'title': f'Marked notes {day}', 'body': body, 'observed_at': observed,
                     'obligations': [], 'day': day}
+        envelope['revision'] = 'sha256:' + envelope_hash(envelope)
         # No hash: an unchanged note may feed several revisions of one day's record.
         origins = [{'id': s['id'], 'resource': str(s['title']).replace('\\', '/')} for s, _lines in notes]
         envelopes.append((envelope, origins))
@@ -273,9 +292,9 @@ def _directory(path: Path) -> Path:
 
 
 def _write(path: Path, data: bytes) -> None:
-    """Atomic write of exact bytes (no newline translation on Windows)."""
-    if path.is_symlink():
-        raise ValueError('Refusing to write through a symlink')
+    """Create a new file atomically with exact bytes; never replace an existing one."""
+    if path.exists() or path.is_symlink():
+        raise ValueError(f'Refusing to overwrite {path.name}')
     handle, temporary = tempfile.mkstemp(dir=path.parent, prefix='.tmp-', suffix=path.suffix)
     try:
         with os.fdopen(handle, 'wb') as stream:
@@ -294,68 +313,13 @@ def knowledge_root(path) -> Path:
         raise ValueError(f'Knowledge repository path: {exc}') from None
 
 
-def _source_records(inbox: Path):
-    for path in sorted(inbox.glob('*.md')):
-        if path.is_symlink():
-            continue
-        text = path.read_bytes().decode('utf-8')
-        front = parse_frontmatter(text)
-        if front is not None and front.get('type') == 'source':
-            yield path, text, front
-
-
-def _exported(inbox: Path) -> dict:
-    """``(title, payload hash)`` of the Source records already in the inbox."""
-    seen = {}
-    for path, _text, front in _source_records(inbox):
-        entries = front.get('sources') or []
-        first = entries[0] if entries and isinstance(entries[0], dict) else {}
-        if isinstance(front.get('title'), str) and isinstance(first.get('hash'), str):
-            seen.setdefault((' '.join(front['title'].split()), first['hash']), path.name)
-    return seen
-
-
-def expire_inbox(root, now: datetime) -> dict:
-    """Mark Source records past ``stale_after`` expired and delete raw payloads only they use."""
-    inbox = Path(root) / 'inbox'
-    raw = inbox / 'raw'
-    if not inbox.is_dir():
-        return {'expired': [], 'removed_raw': []}
-    records = list(_source_records(inbox))
-    expired, keep, release = [], set(), set()
-    for path, text, front in records:
-        resources = {s.get('resource') for s in front.get('sources', []) if isinstance(s, dict)}
-        due = False
-        if front.get('status') == 'raw' and isinstance(front.get('stale_after'), str):
-            try:
-                due = _instant(front['stale_after']) <= now
-            except ValueError:
-                due = False
-        if due:
-            old = 'status: "raw"\n'
-            _write(path, text.replace(old, 'status: "expired"\n', 1).encode('utf-8'))
-            expired.append(path.name)
-            release |= resources
-        elif front.get('status') != 'expired':
-            keep |= resources
-    removed = []
-    for resource in sorted(release - keep):
-        name = Path(str(resource)).name
-        if str(resource) == f'inbox/raw/{name}' and _RAW_NAME.match(name):
-            target = raw / name
-            if target.is_file() and not target.is_symlink():
-                target.unlink()
-                removed.append(name)
-    return {'expired': expired, 'removed_raw': removed}
-
-
 def export_sources(store, destination, *, owner: str, since: str | None = None,
                    scope: str = 'personal', now: datetime | None = None) -> dict:
     """Write Source records for captured sources into ``<destination>/inbox/``.
 
-    Idempotent: a record whose id and revision already exist is not rewritten, and a
-    raw payload already present under its sha256 name is not written again. Deleted
-    (tombstoned) sources and unmarked note lines are never exported.
+    Idempotent and de-duplicated by :func:`envelope_hash`: an envelope already in the
+    inbox, under any revision, is not written again. Existing files are never edited or
+    deleted. Deleted (tombstoned) sources and unmarked note lines are never exported.
     """
     if not isinstance(owner, str) or not owner.strip():
         raise ValueError('An owner is required (--owner or WORK_COPILOT_KNOWLEDGE_OWNER)')
@@ -366,7 +330,6 @@ def export_sources(store, destination, *, owner: str, since: str | None = None,
     root = knowledge_root(destination)
     inbox = _directory(root / 'inbox')
     raw = _directory(inbox / 'raw')
-    expiry = expire_inbox(root, moment)
 
     def recent(source):
         return cutoff is None or _instant(source['observed_at']) >= cutoff
@@ -380,32 +343,26 @@ def export_sources(store, destination, *, owner: str, since: str | None = None,
     for envelope, origins in marked_note_envelopes(store, [s for s in current if s['provider'] == 'vault']):
         pending.append((envelope, envelope['day'], origins))
 
-    seen = _exported(inbox)
-    written, unchanged, duplicates, raw_written = [], [], [], []
+    written, unchanged, raw_written = [], [], []
     for source, day, origins in pending:
-        name = record_name(source['id'], source['provider'], source['revision'])
+        name = record_name(source)
         target = inbox / name
-        if target.exists():
+        if target.exists() or name in written:
             unchanged.append(name)
             continue
         payload = source['body'].encode('utf-8')
         digest = _sha256(payload)
-        # sha256 de-duplication: same title and payload is the same Source.
-        key = (' '.join(source['title'].split()), 'sha256:' + digest)
-        if key in seen:
-            duplicates.append({'record': name, 'duplicate_of': seen[key]})
-            continue
-        seen[key] = name
         raw_name = f'sha256-{digest}.txt'
         raw_path = raw / raw_name
-        if not raw_path.exists() or _sha256(raw_path.read_bytes()) != digest:
+        if not raw_path.exists():
             _write(raw_path, payload)
             raw_written.append(raw_name)
+        elif _sha256(raw_path.read_bytes()) != digest:
+            raise ValueError(f'inbox/raw/{raw_name} does not match its sha256; not overwriting it')
         record = build_record(source, owner=owner.strip(), scope=scope, day=day,
                               raw_resource=f'inbox/raw/{raw_name}', raw_hash=digest,
                               exported_at=moment, extra_sources=origins)
         _write(target, record.encode('utf-8'))
         written.append(name)
-    return {'inbox': str(inbox), 'written': written, 'unchanged': unchanged, 'duplicates': duplicates,
-            'raw_written': raw_written,
-            **expiry, 'external_writes': False}
+    return {'inbox': str(inbox), 'written': written, 'unchanged': unchanged,
+            'raw_written': raw_written, 'external_writes': False}
