@@ -47,7 +47,7 @@ _SECURE_BACKENDS = ('keyring.backends.macOS', 'keyring.backends.Windows', 'keyri
 # Windows Credential Manager caps one secret at 2560 bytes (1280 UTF-16 characters); OAuth tokens and
 # client registrations can exceed that, so long values are split across entries on every OS.
 _CHUNK_CHARS = 1000
-_CHUNK_MANIFEST = 'work-copilot-chunks:v1:'
+_CHUNK_MANIFEST = 'work-copilot-chunks:v2:'
 _KINDS = ('metadata', 'tokens', 'client')
 PROTECTED_FILE_REMOVED = (
     'storage "protected-file" was removed: OAuth tokens are kept only in the OS keychain. Set "storage": "keyring", '
@@ -98,56 +98,79 @@ class KeyringStorage:
     def _key(self, kind):
         return self.identity + ':' + kind
 
+    def _manifest(self, key):
+        """Return (generation, count) when the entry is chunked, else None."""
+        value = self.keyring.get_password(KEYRING_SERVICE, key)
+        if not value or not value.startswith(_CHUNK_MANIFEST):
+            return None
+        generation, _, count = value[len(_CHUNK_MANIFEST):].partition(':')
+        return (generation, int(count)) if generation and count.isdigit() else (generation, 0)
+
+    @staticmethod
+    def _chunk_key(key, generation, index):
+        return key + '#' + generation + '#' + str(index)
+
     def _read(self, kind):
         key = self._key(kind)
         value = self.keyring.get_password(KEYRING_SERVICE, key)
         if not value or not value.startswith(_CHUNK_MANIFEST):
             return value or None
-        parts = [self.keyring.get_password(KEYRING_SERVICE, key + '#' + str(i)) for i in range(int(value[len(_CHUNK_MANIFEST):]))]
-        # An interrupted write leaves an incomplete set; treat it as absent so the user re-authorizes.
+        manifest = self._manifest(key)
+        if not manifest or not manifest[1]:
+            return None
+        generation, count = manifest
+        parts = [self.keyring.get_password(KEYRING_SERVICE, self._chunk_key(key, generation, i)) for i in range(count)]
+        # Inconsistent state (missing chunk) reads as signed out; callers then ask for connect --authorize.
         return None if any(part is None for part in parts) else ''.join(parts)
-
-    def _chunk_count(self, key):
-        value = self.keyring.get_password(KEYRING_SERVICE, key)
-        return int(value[len(_CHUNK_MANIFEST):]) if value and value.startswith(_CHUNK_MANIFEST) else 0
 
     def _delete(self, key):
         if self.keyring.get_password(KEYRING_SERVICE, key) is not None:
             self.keyring.delete_password(KEYRING_SERVICE, key)
 
+    def _delete_generation(self, key, manifest):
+        if manifest:
+            for i in range(manifest[1]):
+                self._delete(self._chunk_key(key, manifest[0], i))
+
     def _write(self, kind, text):
+        """Write chunks under a fresh generation, commit with one manifest update, then drop the old one.
+
+        An interruption before the commit leaves the previous value intact; after it, only orphaned
+        old chunks remain. A reader never sees chunks from two writes spliced together.
+        """
         key = self._key(kind)
-        old = self._chunk_count(key)
+        old = self._manifest(key)
         if len(text) <= _CHUNK_CHARS and not text.startswith(_CHUNK_MANIFEST):
             self.keyring.set_password(KEYRING_SERVICE, key, text)
-            new = 0
         else:
+            generation = secrets.token_hex(8)
             parts = [text[i:i + _CHUNK_CHARS] for i in range(0, len(text), _CHUNK_CHARS)]
             for i, part in enumerate(parts):
-                self.keyring.set_password(KEYRING_SERVICE, key + '#' + str(i), part)
-            self.keyring.set_password(KEYRING_SERVICE, key, _CHUNK_MANIFEST + str(len(parts)))
-            new = len(parts)
-        for i in range(new, old):
-            self._delete(key + '#' + str(i))
+                self.keyring.set_password(KEYRING_SERVICE, self._chunk_key(key, generation, i), part)
+            self.keyring.set_password(KEYRING_SERVICE, key, _CHUNK_MANIFEST + generation + ':' + str(len(parts)))
+        self._delete_generation(key, old)
 
     def clear(self):
         """Remove every entry for this connector identity."""
         for kind in _KINDS:
             key = self._key(kind)
-            for i in range(self._chunk_count(key)):
-                self._delete(key + '#' + str(i))
+            self._delete_generation(key, self._manifest(key))
             self._delete(key)
 
     def _get(self, kind, model):
         value = self._read(kind)
         if not value: return None
-        payload = json.loads(value)
-        if kind == 'tokens' and 'token' in payload:
-            token = payload['token']
-            if payload.get('expires_at') is not None:
-                token['expires_in'] = max(0, int(payload['expires_at'] - time.time()))
-            return model.model_validate(token)
-        return model.model_validate(payload)
+        try:
+            payload = json.loads(value)
+            if kind == 'tokens' and isinstance(payload, dict) and 'token' in payload:
+                token = payload['token']
+                if payload.get('expires_at') is not None:
+                    token['expires_in'] = max(0, int(payload['expires_at'] - time.time()))
+                return model.model_validate(token)
+            return model.model_validate(payload)
+        except (ValueError, TypeError, KeyError):
+            # Corrupt or inconsistent entry (pydantic ValidationError is a ValueError): treat as signed out.
+            return None
 
     async def get_metadata(self):
         return self._get('metadata', OAuthMetadata)

@@ -21,11 +21,35 @@ async def test_tokens_round_trip_through_keychain_in_chunks(tmp_path, fake_keyri
     assert list(tmp_path.iterdir())==[]
 
 @pytest.mark.asyncio
-async def test_incomplete_chunked_entry_reads_as_signed_out(fake_keyring):
+async def test_inconsistent_chunked_entry_reads_as_signed_out(fake_keyring):
     store=KeyringStorage('identity-b')
     await store.set_tokens(OAuthToken(access_token='y'*3000, token_type='Bearer'))
-    del fake_keyring.entries[('work-copilot','identity-b:tokens#1')]
+    chunk=next(k for k in fake_keyring.entries if k[1].endswith('#1'))
+    saved=fake_keyring.entries.pop(chunk)
     assert await store.get_tokens() is None
+    fake_keyring.entries[chunk]=saved[:-1]+'"'
+    assert await store.get_tokens() is None
+    fake_keyring.entries[('work-copilot','identity-b:tokens')]='work-copilot-chunks:v2:other:3'
+    assert await store.get_tokens() is None
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('fail_after',[1,2,3,4])
+async def test_interrupted_chunked_write_never_splices_tokens(fake_keyring,fail_after):
+    store=KeyringStorage('identity-c')
+    old='old-'+'a'*3000
+    await store.set_tokens(OAuthToken(access_token=old, token_type='Bearer'))
+    writes={'n':0}; original=fake_keyring.set_password
+    def failing(service,username,password):
+        writes['n']+=1
+        if writes['n']>fail_after: raise OSError('interrupted')
+        original(service,username,password)
+    fake_keyring.set_password=failing
+    with pytest.raises(OSError):
+        await store.set_tokens(OAuthToken(access_token='new-'+'b'*3000, token_type='Bearer'))
+    fake_keyring.set_password=original
+    restored=await store.get_tokens()
+    # Before the commit the previous token is intact; never a mix of old and new chunks.
+    assert restored is not None and restored.access_token==old
 
 def test_keychain_unavailable_fails_closed(monkeypatch):
     import sys
@@ -129,7 +153,8 @@ async def test_real_http_mcp_oauth_discovery_collect_restart(tmp_path, monkeypat
         assert store.snapshot()['connectors'][0]['status']=='auth_required'
         result=await remote_discover(store,config,tmp_path,True)
         assert any(t['name']=='read_messages' for t in result['tools'])
-        assert sorted(p.suffix for p in (tmp_path/'oauth').iterdir())==['.lock'], 'no credential file may be written'
+        # Only lock files may exist (the lock library removes them on release on Windows).
+        assert [p for p in (tmp_path/'oauth').iterdir() if p.suffix!='.lock']==[], 'no credential file may be written'
         assert 'test-access' not in ''.join(p.read_bytes().decode('utf-8','replace') for p in tmp_path.rglob('*') if p.is_file())
         token_key=next(k for (_,k) in fake_keyring.entries if k.endswith(':tokens'))
         saved=json.loads(fake_keyring.entries[('work-copilot',token_key)]);saved['expires_at']=0

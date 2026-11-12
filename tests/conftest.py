@@ -31,7 +31,10 @@ _WindowsLikeBackend.__module__ = 'keyring.backends.Windows'
 def fake_keyring(monkeypatch):
     """Install a fake `keyring` module whose backend looks like a secure OS keychain."""
     backend = _WindowsLikeBackend()
-    module = types.SimpleNamespace(get_keyring=lambda: backend, get_password=backend.get_password,
-                                   set_password=backend.set_password, delete_password=backend.delete_password)
+    # Delegate late so a test can replace a backend method (for example to simulate an interruption).
+    module = types.SimpleNamespace(get_keyring=lambda: backend,
+                                   get_password=lambda *a: backend.get_password(*a),
+                                   set_password=lambda *a: backend.set_password(*a),
+                                   delete_password=lambda *a: backend.delete_password(*a))
     monkeypatch.setitem(sys.modules, 'keyring', module)
     return backend

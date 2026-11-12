@@ -26,10 +26,13 @@ async def test_os_keychain_round_trip(tmp_path):
         restored = await store.get_tokens()
         assert restored is not None
         assert restored.access_token == access and restored.refresh_token == 'fictional-refresh'
+        key = store.identity + ':tokens'
+        manifest = store._manifest(key)
+        assert manifest is not None and manifest[1] > 1, 'large token must be split across entries'
         await store.set_tokens(OAuthToken(access_token='fictional-short', token_type='Bearer'))
         short = await store.get_tokens()
         assert short is not None and short.access_token == 'fictional-short'
-        assert keyring.get_password(KEYRING_SERVICE, store.identity + ':tokens#0') is None
+        assert keyring.get_password(KEYRING_SERVICE, store._chunk_key(key, manifest[0], 0)) is None
     finally:
         store.clear()
     assert await store.get_tokens() is None
