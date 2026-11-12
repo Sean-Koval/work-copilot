@@ -1,18 +1,86 @@
 import json
-import os
+
 import pytest
-from work_copilot.remote_mcp import ProtectedFileStorage, load_config, normalize_result
+from work_copilot.remote_mcp import KeychainUnavailable, KeyringStorage, load_config, normalize_result
 from mcp.shared.auth import OAuthToken
 
 @pytest.mark.asyncio
-async def test_credentials_require_explicit_storage_and_private_permissions(tmp_path):
-    store=ProtectedFileStorage(tmp_path/'tokens.json')
-    await store.set_tokens(OAuthToken(access_token='fictional-secret', token_type='Bearer'))
-    assert (tmp_path/'tokens.json').stat().st_mode & 0o777 == 0o600
-    assert (await store.get_tokens()).access_token=='fictional-secret'
-    os.chmod(tmp_path/'tokens.json',0o644)
-    with pytest.raises(ValueError,match='private'):
-        await store.get_tokens()
+async def test_tokens_round_trip_through_keychain_in_chunks(tmp_path, fake_keyring):
+    store=KeyringStorage('identity-a')
+    big='fictional-'+'x'*4000
+    await store.set_tokens(OAuthToken(access_token=big, token_type='Bearer', refresh_token='fictional-refresh'))
+    restored=await store.get_tokens()
+    assert restored is not None and restored.access_token==big
+    assert all(len(v)<=1000 for v in fake_keyring.entries.values())
+    await store.set_tokens(OAuthToken(access_token='short', token_type='Bearer'))
+    restored=await store.get_tokens()
+    assert restored is not None and restored.access_token=='short'
+    assert {k for _,k in fake_keyring.entries}=={'identity-a:tokens'}
+    store.clear()
+    assert fake_keyring.entries=={} and await store.get_tokens() is None
+    assert list(tmp_path.iterdir())==[]
+
+@pytest.mark.asyncio
+async def test_inconsistent_chunked_entry_reads_as_signed_out(fake_keyring):
+    store=KeyringStorage('identity-b')
+    await store.set_tokens(OAuthToken(access_token='y'*3000, token_type='Bearer'))
+    chunk=next(k for k in fake_keyring.entries if k[1].endswith('#1'))
+    saved=fake_keyring.entries.pop(chunk)
+    assert await store.get_tokens() is None
+    fake_keyring.entries[chunk]=saved[:-1]+'"'
+    assert await store.get_tokens() is None
+    fake_keyring.entries[('work-copilot','identity-b:tokens')]='work-copilot-chunks:v2:other:3'
+    assert await store.get_tokens() is None
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('fail_after',[1,2,3,4])
+async def test_interrupted_chunked_write_never_splices_tokens(fake_keyring,fail_after):
+    store=KeyringStorage('identity-c')
+    old='old-'+'a'*3000
+    await store.set_tokens(OAuthToken(access_token=old, token_type='Bearer'))
+    writes={'n':0}; original=fake_keyring.set_password
+    def failing(service,username,password):
+        writes['n']+=1
+        if writes['n']>fail_after: raise OSError('interrupted')
+        original(service,username,password)
+    fake_keyring.set_password=failing
+    with pytest.raises(OSError):
+        await store.set_tokens(OAuthToken(access_token='new-'+'b'*3000, token_type='Bearer'))
+    fake_keyring.set_password=original
+    restored=await store.get_tokens()
+    # Before the commit the previous token is intact; never a mix of old and new chunks.
+    assert restored is not None and restored.access_token==old
+
+def test_keychain_unavailable_fails_closed(monkeypatch):
+    import sys
+    import types
+    def install(backend):
+        monkeypatch.setitem(sys.modules,'keyring',types.SimpleNamespace(get_keyring=lambda:backend))
+    install(type('Keyring',(),{'__module__':'keyring.backends.fail'})())
+    with pytest.raises(KeychainUnavailable,match='Secret Service') as failure:
+        KeyringStorage('identity')
+    assert 'never written to a file' in str(failure.value)
+    plaintext=type('PlaintextKeyring',(),{'__module__':'keyrings.alt.file'})()
+    secure=type('Keyring',(),{'__module__':'keyring.backends.SecretService'})()
+    chained=type('ChainerBackend',(),{'__module__':'keyring.backends.chainer'})
+    install(type('Chain',(chained,),{'__module__':'keyring.backends.chainer','backends':[secure,plaintext]})())
+    with pytest.raises(KeychainUnavailable):
+        KeyringStorage('identity')
+    install(type('Chain',(chained,),{'__module__':'keyring.backends.chainer','backends':[secure]})())
+    assert KeyringStorage('identity').identity=='identity'
+
+def test_keychain_requires_keyring_package(monkeypatch):
+    import sys
+    monkeypatch.setitem(sys.modules,'keyring',None)
+    with pytest.raises(KeychainUnavailable,match='oauth-keyring'):
+        KeyringStorage('identity')
+
+def test_protected_file_config_is_rejected_with_migration_step(tmp_path):
+    p=tmp_path/'config.json';p.write_text(json.dumps({'endpoint':'https://example.invalid/mcp','storage':'protected-file'}))
+    with pytest.raises(ValueError,match='protected-file') as failure:
+        load_config(p)
+    for step in ('"storage": "keyring"','oauth/*.json','connect --authorize','not migrated'):
+        assert step in str(failure.value)
 
 def test_config_and_normalization(tmp_path):
     p=tmp_path/'config.json';p.write_text(json.dumps({'endpoint':'https://example.invalid/mcp'}))
@@ -22,7 +90,7 @@ def test_config_and_normalization(tmp_path):
     assert normalize_result({'messages':[{'messageId':'a','text':'hello'}], 'next':'2'}, {'items_path':'messages','fields':{'id':'messageId','body':'text'},'constants':{'provider':'symphony'},'next_cursor_path':'next'}) == ([{'id':'a','body':'hello','provider':'symphony'}],'2',None)
 
 @pytest.mark.asyncio
-async def test_real_http_mcp_oauth_discovery_collect_restart(tmp_path, monkeypatch):
+async def test_real_http_mcp_oauth_discovery_collect_restart(tmp_path, monkeypatch, fake_keyring):
     import asyncio, socket, threading, time
     import httpx, uvicorn
     from fastapi import FastAPI, Request
@@ -78,15 +146,19 @@ async def test_real_http_mcp_oauth_discovery_collect_restart(tmp_path, monkeypat
     monkeypatch.setattr('work_copilot.remote_mcp.webbrowser.open',fake_browser)
     from work_copilot.store import Store
     store=Store(tmp_path/'copilot.db');config=tmp_path/'config.json'
-    config.write_text(json.dumps({'endpoint':base+'/mcp/','storage':'protected-file','callback_port':callback_port,'tool':'read_messages','allowed_read_tools':['read_messages']}))
+    config.write_text(json.dumps({'endpoint':base+'/mcp/','storage':'keyring','callback_port':callback_port,'tool':'read_messages','allowed_read_tools':['read_messages']}))
     try:
         with pytest.raises(RuntimeError,match='reconnect'):
             await remote_discover(store,config,tmp_path,False)
         assert store.snapshot()['connectors'][0]['status']=='auth_required'
         result=await remote_discover(store,config,tmp_path,True)
         assert any(t['name']=='read_messages' for t in result['tools'])
-        credential=next((tmp_path/'oauth').glob('*.json'))
-        saved=json.loads(credential.read_text(encoding='utf-8'));saved['expires_at']=0;credential.write_text(json.dumps(saved))
+        # Only lock files may exist (the lock library removes them on release on Windows).
+        assert [p for p in (tmp_path/'oauth').iterdir() if p.suffix!='.lock']==[], 'no credential file may be written'
+        assert 'test-access' not in ''.join(p.read_bytes().decode('utf-8','replace') for p in tmp_path.rglob('*') if p.is_file())
+        token_key=next(k for (_,k) in fake_keyring.entries if k.endswith(':tokens'))
+        saved=json.loads(fake_keyring.entries[('work-copilot',token_key)]);saved['expires_at']=0
+        fake_keyring.entries[('work-copilot',token_key)]=json.dumps(saved)
         store.close(); store=Store(tmp_path/'copilot.db')
         result=await remote_collect(store,config,tmp_path,False)
         assert result['items']==1 and store.list_sources()[0]['id']=='fictional:room:1'
@@ -109,8 +181,8 @@ async def test_real_http_mcp_oauth_discovery_collect_restart(tmp_path, monkeypat
         await asyncio.to_thread(thread.join,5)
 
 @pytest.mark.asyncio
-async def test_persist_absolute_expiry(tmp_path, monkeypatch):
-    storage=ProtectedFileStorage(tmp_path/'tokens.json')
+async def test_persist_absolute_expiry(monkeypatch, fake_keyring):
+    storage=KeyringStorage('identity-expiry')
     monkeypatch.setattr('work_copilot.remote_mcp.time.time',lambda:100)
     await storage.set_tokens(OAuthToken(access_token='fictional', token_type='Bearer',expires_in=20))
     monkeypatch.setattr('work_copilot.remote_mcp.time.time',lambda:115)
@@ -125,7 +197,7 @@ async def test_connector_lock_preserves_status(tmp_path):
     import hashlib
     from work_copilot.remote_mcp import remote_discover, _identity
     endpoint='https://example.invalid/mcp'
-    config=tmp_path/'config.json'; config.write_text(json.dumps({'endpoint':endpoint,'storage':'protected-file'}))
+    config=tmp_path/'config.json'; config.write_text(json.dumps({'endpoint':endpoint,'storage':'keyring'}))
     lock_dir=tmp_path/'oauth';lock_dir.mkdir()
     lock=FileLock(str(lock_dir/(_identity({'endpoint':endpoint,'name':'remote-mcp'},tmp_path)+'.lock')))
     with lock:
@@ -156,7 +228,7 @@ def test_sdk_oauth_logs_are_redacted(caplog):
     ({'scope':['read']},'scope'),
 ])
 def test_config_rejects_unsafe_field_types(tmp_path,change,field):
-    config={'endpoint':'https://example.invalid/mcp','storage':'protected-file',**change}
+    config={'endpoint':'https://example.invalid/mcp','storage':'keyring',**change}
     path=tmp_path/'config.json';path.write_text(json.dumps(config))
     with pytest.raises(ValueError,match=field):load_config(path)
 

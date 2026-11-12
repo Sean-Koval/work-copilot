@@ -29,7 +29,13 @@ Save outside the checkout, for example `~/.config/work-copilot/symphony.json`:
 }
 ```
 
-Install OS-backed credentials support with `python -m pip install -e '.[oauth-keyring]'` in the environment you use to run Work Copilot. The selected keyring must be a secure OS backend; configure it before connecting. No automatic fallback occurs. Plaintext, chained and unavailable keyring backends are rejected; select a supported secure OS backend explicitly. Credentials are isolated by data directory, connector profile/name and endpoint. On POSIX, an **explicit** `"storage": "protected-file"` alternative stores unencrypted OAuth tokens and client registration under the private app data directory, with directory mode 0700 and file mode 0600. This is not disk encryption. Protected-file mode is rejected on Windows. Use an OS keyring there.
+Install OS keychain support with `python -m pip install -e '.[oauth-keyring]'` in the environment you use to run Work Copilot. OAuth tokens, client registration and server metadata are stored **only** in the OS keychain: macOS Keychain or Windows Credential Manager. On Linux, an unlocked Secret Service (GNOME Keyring or KWallet) is required. `"storage": "keyring"` is the only accepted value. Plaintext, null and unavailable keyring backends are rejected, and a chained backend is accepted only if every backend in the chain is an OS keychain. There is no file fallback: without a keychain, `connect` fails with an error that names the active backend. Long values are split across several keychain entries, because Windows Credential Manager caps one entry at 1280 characters. Credentials are isolated by data directory, connector profile/name and endpoint. `doctor --config` reports the active backend without reading any credential.
+
+**Migrating from `protected-file`.** The unencrypted `"storage": "protected-file"` mode has been removed. A configuration that still names it fails with this migration step, and tokens are not migrated automatically:
+
+1. Set `"storage": "keyring"` and install the `oauth-keyring` extra.
+2. Delete the old token files: `oauth/*.json` under the Work Copilot data directory. Keep the `.lock` files, or let them be recreated. `doctor --config` counts any leftover token files without opening them.
+3. Run `work-copilot connect --config ... --authorize` to sign in again.
 
 `client_id` optionally supplies a pre-registered public-client ID. `client_metadata_url` optionally supplies an administrator-approved HTTPS client metadata URL. Only enable `"trust_env": true` if your approved corporate HTTP proxy/CA environment requires it (install `httpx[socks]` if using a SOCKS proxy). Otherwise network clients ignore proxy environment variables by default.
 

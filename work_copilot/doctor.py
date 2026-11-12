@@ -22,19 +22,23 @@ def _runtime_checks():
             'dependencies':{'ok':all(v['ok'] for v in versions.values()),'packages':versions}}
 
 
-def _storage_check(settings):
-    if settings['storage']=='protected-file':
-        return {'ok':os.name=='posix','mode':'protected-file','note':'Explicit unencrypted POSIX 0600 storage; no token file opened or created. Use an OS keyring on Windows.'}
+def _storage_check(directory):
+    """Inspect the keychain backend without reading credentials; flag leftover plaintext token files."""
+    from .remote_mcp import KeychainUnavailable, secure_keyring
     try:
-        import keyring
-        backend=keyring.get_keyring()
-        module=type(backend).__module__
-        secure=any(module.startswith(prefix) for prefix in ('keyring.backends.SecretService','keyring.backends.macOS','keyring.backends.Windows','keyring.backends.kwallet','keyring.backends.libsecret'))
-        return {'ok':secure,'mode':'keyring','backend':module,'note':'Secure OS backend detected; unlocked state and credential validity were not checked.' if secure else 'Configure a supported secure OS keyring backend; plaintext, chained and fail backends are rejected.'}
-    except ImportError:
-        return {'ok':False,'mode':'keyring','note':'Install the oauth-keyring extra and configure a secure OS keyring backend; no automatic plaintext fallback.'}
-    except Exception:
-        return {'ok':False,'mode':'keyring','note':'OS keyring backend is unavailable. Configure a secure OS keyring backend before explicit OAuth authorization.'}
+        backend=secure_keyring().get_keyring()
+        result={'ok':True,'mode':'keyring','backend':type(backend).__module__,'note':'Secure OS keychain detected; unlocked state and credential validity were not checked.'}
+    except KeychainUnavailable as exc:
+        result={'ok':False,'mode':'keyring','note':str(exc)+'.'}
+    oauth=directory/'oauth'
+    try:
+        leftovers=len(list(oauth.glob('*.json'))) if oauth.is_dir() and not oauth.is_symlink() else 0
+    except OSError:
+        leftovers=0
+    if leftovers:
+        # Presence only: the files are never opened.
+        result.update(ok=False,legacy_token_files=leftovers,note=result['note']+' Delete the '+str(leftovers)+' unencrypted token file(s) left in oauth/ by the removed protected-file mode, then run connect --authorize.')
+    return result
 
 
 def _database_details(db):
@@ -68,7 +72,7 @@ def _result(directory, database, connectors, projects, timezone_name, vault, con
             selected=settings.get('tool')
             ready=bool(selected and selected in settings.get('allowed_read_tools',[]))
             checks['connector']={'ok':bool(state and state.get('status')=='healthy'),'status':state.get('status') if state else 'auth_or_discovery_required','name':settings['name'],'allowed_read_tools':settings.get('allowed_read_tools',[]),'collection_configured':ready,'last_success':state.get('last_success') if state else None,'gap_since':state.get('gap_since') if state else None,'note':'Configuration inspected offline; remote schemas, capabilities and credential validity were not probed. '+('Read tool selected; verify its arguments and mapping with your administrator.' if ready else 'Run explicit connect --authorize when approved, then select a verified tool in allowed_read_tools and configure arguments/mapping before collection.')}
-            checks['oauth_storage']=_storage_check(settings)
+            checks['oauth_storage']=_storage_check(directory)
         except ValueError as exc:
             # load_config emits field-only validation errors, not input values.
             checks['connector']={'ok':False,'status':'invalid_config','note':str(exc)+'; see docs/SYMPHONY_MCP.md. No network request made.'}
