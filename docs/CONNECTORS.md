@@ -93,11 +93,13 @@ From the selected vault, only lines starting with `>>` are exported. They form o
 
 `work-copilot review-queue --repo <local clone> --github <owner/repo> --me <GitHub login>` puts what waits on you in "Needs you" as `review` obligations, each with its age:
 
-- open PRs labelled `records` where you are a requested reviewer or a `CODEOWNERS` owner of a changed file, due 48 hours after opening;
+- open records PRs, due 48 hours after opening. A records PR is labelled `records` or changes Markdown under the check roots or `inbox/`. With `--review all` (the default, for a personal repository) every one is listed, since the nightly batch opens them under your account. With `--review assigned` (a team repository) only those that request you, that you code-own, that you opened, or that a `--batch-author` opened;
 - records under the check roots that you own (`--owner`, else `--me`) whose `stale_after` has passed;
 - inbox Source records still `raw` after 25 days, five days before they expire.
 
-An item missing from the next run resolves itself, and reopens if it returns. Defaults come from `WORK_COPILOT_KNOWLEDGE_REPO`, `WORK_COPILOT_KNOWLEDGE_GITHUB`, `WORK_COPILOT_GITHUB_LOGIN` and `WORK_COPILOT_KNOWLEDGE_OWNER`. Without `--github`, only the local items are collected.
+An item missing from the next run resolves itself, and reopens if it returns. Defaults come from `WORK_COPILOT_KNOWLEDGE_REPO`, `WORK_COPILOT_KNOWLEDGE_GITHUB`, `WORK_COPILOT_GITHUB_LOGIN`, `WORK_COPILOT_KNOWLEDGE_OWNER`, `WORK_COPILOT_KNOWLEDGE_REVIEW` and `WORK_COPILOT_KNOWLEDGE_BATCH_AUTHORS`. Without `--github`, only the local items are collected.
+
+`serve --review-repo <clone>` with the same options refreshes the queue on the collector poll cadence.
 
 The clone is only read. Pull requests are read with `gh api --method GET`, so `gh` holds the credentials. Work Copilot never approves, comments on or merges a PR. The MCP `get_attention` tool shows `kind`, `url`, `opened_at` and `age_hours`.
 

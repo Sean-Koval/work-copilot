@@ -2,8 +2,10 @@
 
 Three things wait on the user and become ``review`` obligations in "Needs you":
 
-* open pull requests labelled ``records`` where the user is a requested reviewer or a
-  code owner of a changed file, read from the GitHub REST API with GET only;
+* open pull requests labelled ``records``, read from the GitHub REST API with GET only:
+  all of them in a personal repository (``review='all'``), or in a team repository
+  those where the user is a requested reviewer, a code owner or the author, and those
+  the batch bot opened (``review='assigned'``);
 * records under the check roots (``team/``, ``projects/``) that the user owns and
   whose ``stale_after`` (formerly ``review_by``) has passed;
 * inbox Source records still ``raw`` and older than 25 days, so they expire in 5.
@@ -31,6 +33,7 @@ from urllib.parse import quote
 
 CONNECTOR = 'knowledge-review'
 RECORDS_LABEL = 'records'
+REVIEW_MODES = ('all', 'assigned')
 REVIEW_WINDOW = timedelta(hours=48)
 SOURCE_WARNING_AGE = timedelta(days=25)
 SOURCE_WINDOW = timedelta(days=30)
@@ -159,18 +162,50 @@ def _revision(*parts) -> str:
 # --- Collectors ---------------------------------------------------------------
 
 
-def pull_request_items(fetch: Fetch, repository: str, me: str, rules) -> list[dict]:
-    """Open ``records`` PRs where ``me`` is a requested reviewer or a code owner."""
+def _is_record_path(path: str, roots) -> bool:
+    return path.split('/', 1)[0] in (*roots, 'inbox') and path.endswith('.md')
+
+
+def pull_request_items(fetch: Fetch, repository: str, me: str, rules, *, review: str = 'all',
+                       batch_authors=(), record_roots=DEFAULT_ROOTS) -> list[dict]:
+    """Open records PRs that wait on ``me``: labelled ``records``, or changing record files.
+
+    ``review='all'`` (the personal repository) lists every open ``records`` PR, because the
+    nightly batch opens them under the user's own account. ``review='assigned'`` (a team
+    repository) lists PRs where ``me`` is a requested reviewer or a code owner of a changed
+    file, plus PRs authored by ``me`` or by one of ``batch_authors``.
+    """
+    if review not in REVIEW_MODES:
+        raise ValueError('review must be one of ' + ', '.join(REVIEW_MODES))
     login = me.lstrip('@').lower()
+    batch = {name.lstrip('@').lower() for name in batch_authors if name}
     items = []
     for pull in _pages(fetch, f'repos/{repository}/pulls?state=open'):
-        labels = {str(label.get('name', '')).lower() for label in pull.get('labels') or [] if isinstance(label, dict)}
-        if RECORDS_LABEL not in labels or pull.get('draft'):
+        if pull.get('draft'):
             continue
-        reviewers = {str(r.get('login', '')).lower() for r in pull.get('requested_reviewers') or [] if isinstance(r, dict)}
-        why = 'requested reviewer' if login in reviewers else None
-        if why is None and rules and str((pull.get('user') or {}).get('login', '')).lower() != login:
+        labels = {str(label.get('name', '')).lower() for label in pull.get('labels') or [] if isinstance(label, dict)}
+        files = None
+        if RECORDS_LABEL not in labels:
+            # The live repository had no `records` label and the batch PR carried none, so a PR
+            # that changes record files counts as a records PR too.
             files = _pages(fetch, f'repos/{repository}/pulls/{int(pull["number"])}/files')
+            if not any(_is_record_path(str(f.get('filename', '')), record_roots) for f in files):
+                continue
+        author = str((pull.get('user') or {}).get('login', '')).lower()
+        reviewers = {str(r.get('login', '')).lower() for r in pull.get('requested_reviewers') or [] if isinstance(r, dict)}
+        if review == 'all':
+            why = 'owner of this repository'
+        elif login in reviewers:
+            why = 'requested reviewer'
+        elif author == login:
+            why = 'author'
+        elif author in batch:
+            why = 'reviewer of the batch'
+        else:
+            why = None
+        if why is None and rules:
+            if files is None:
+                files = _pages(fetch, f'repos/{repository}/pulls/{int(pull["number"])}/files')
             if any(login in owners_of(rules, str(f.get('filename', ''))) for f in files):
                 why = 'code owner'
         if why is None:
@@ -262,7 +297,8 @@ def expiring_source_items(root: Path, now: datetime) -> list[dict]:
 
 
 def collect_review_queue(store, repo, *, me: str, owner: str | None = None, github: str | None = None,
-                         fetch: Fetch | None = None, now: datetime | None = None) -> dict:
+                         review: str = 'all', batch_authors=(), fetch: Fetch | None = None,
+                         now: datetime | None = None) -> dict:
     """Collect the queue and sync it into ``store``; returns counts, never writes externally."""
     from .knowledge import knowledge_root
     if not isinstance(me, str) or not me.strip():
@@ -273,7 +309,8 @@ def collect_review_queue(store, repo, *, me: str, owner: str | None = None, gith
     if github:
         if github.count('/') != 1 or any(not part or part != quote(part, safe='-_.') for part in github.split('/')):
             raise ValueError('--github must be owner/repository')
-        items += pull_request_items(fetch or gh_reader(), github, me, codeowner_rules(root))
+        items += pull_request_items(fetch or gh_reader(), github, me, codeowner_rules(root), review=review,
+                                    batch_authors=batch_authors, record_roots=_record_roots(root))
     items += overdue_record_items(root, owner or me, moment)
     items += expiring_source_items(root, moment)
     result = store.sync_review_queue(items, connector=CONNECTOR, observed_at=moment.isoformat())

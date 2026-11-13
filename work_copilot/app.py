@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import secrets
 import threading
+from typing import Any
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Request, Query
@@ -60,7 +61,7 @@ class DraftEdit(BaseModel):
     text: str = Field(max_length=30000)
 
 
-def create_app(data_dir: Path, demo: bool = False, vault: Path | None = None, poll_seconds: float = 30, connector_config: Path | None = None) -> FastAPI:
+def create_app(data_dir: Path, demo: bool = False, vault: Path | None = None, poll_seconds: float = 30, connector_config: Path | None = None, review_queue: dict[str, Any] | None = None) -> FastAPI:
     data_dir = Path(data_dir).expanduser().resolve()
     data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     store = Store(data_dir / 'copilot.db')
@@ -89,6 +90,15 @@ def create_app(data_dir: Path, demo: bool = False, vault: Path | None = None, po
         export_projects(store, selected)
         return result
 
+    def refresh_review_queue():
+        # Read-only knowledge review queue (KAN-468), on the same cadence as the other collectors.
+        from .review_queue import CONNECTOR, collect_review_queue
+        settings: dict[str, Any] = dict(review_queue or {})
+        try:
+            collect_review_queue(store, **settings)
+        except Exception:
+            store.set_connector(CONNECTOR, 'error', 'Review queue refresh failed; run work-copilot review-queue for details.')
+
     async def worker():
         while True:
             if selected:
@@ -103,6 +113,8 @@ def create_app(data_dir: Path, demo: bool = False, vault: Path | None = None, po
                         await remote_collect(store, connector_config, data_dir, authorize=False)
                 except Exception:
                     pass  # Connector records sanitized status; never log work payloads or token errors.
+            if review_queue:
+                await asyncio.to_thread(refresh_review_queue)
             await asyncio.sleep(max(5, poll_seconds))
 
     @asynccontextmanager
@@ -169,7 +181,7 @@ def create_app(data_dir: Path, demo: bool = False, vault: Path | None = None, po
     @app.get('/api/state')
     def state():
         result = store.snapshot()
-        result['runtime'] = {'external_sends':False, 'draft_mode':'offline_template', 'vault_selected':selected is not None, 'poll_seconds':max(5,poll_seconds), 'demo':demo, 'connector_configured':connector_config is not None, 'live_connectors':'Explicit OAuth MCP configuration required; no account connected automatically.'}
+        result['runtime'] = {'external_sends':False, 'draft_mode':'offline_template', 'vault_selected':selected is not None, 'poll_seconds':max(5,poll_seconds), 'demo':demo, 'connector_configured':connector_config is not None, 'review_queue_configured':review_queue is not None, 'live_connectors':'Explicit OAuth MCP configuration required; no account connected automatically.'}
         return result
 
     @app.get('/api/search')
