@@ -600,7 +600,7 @@ class Store:
             raise ValueError('Review queue items must be a list')
         observed=observed_at or self.now().isoformat()
         present=set(); opened=[]; reopened=[]; resolved=[]
-        fields=('title','review_kind','url','path','opened_at','due_at')
+        fields=('title','review_kind','url','path','opened_at','due_at','draft')
         with self._transaction():
             for item in items:
                 if not isinstance(item,dict) or not all(isinstance(item.get(k),str) and item[k] for k in ('key','title','body','revision','opened_at')):

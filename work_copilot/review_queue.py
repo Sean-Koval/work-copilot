@@ -4,8 +4,9 @@ Three things wait on the user and become ``review`` obligations in "Needs you":
 
 * open pull requests labelled ``records``, read from the GitHub REST API with GET only:
   all of them in a personal repository (``review='all'``), or in a team repository
-  those where the user is a requested reviewer, a code owner or the author, and those
-  the batch bot opened (``review='assigned'``);
+  those where the user is a requested reviewer, in a requested team, a code owner or
+  the author, and those the batch bot opened (``review='assigned'``). Drafts count
+  when they change record files, since ai-dlc ``propose`` opens drafts;
 * records under the check roots (``team/``, ``projects/``) that the user owns and
   whose ``stale_after`` (formerly ``review_by``) has passed;
 * inbox Source records still ``raw`` and older than 25 days, so they expire in 5.
@@ -61,6 +62,8 @@ def gh_reader(runner=subprocess.run, executable: str | None = None) -> Fetch:
         result = runner([binary, 'api', '--method', 'GET', path], capture_output=True, text=True,
                         encoding='utf-8', timeout=60, check=False)
         if result.returncode != 0:
+            if 'HTTP 404' in (result.stderr or ''):
+                raise LookupError(path.split('?')[0])
             raise RuntimeError('gh api GET failed for ' + path.split('?')[0] + '; check gh auth status')
         return json.loads(result.stdout or 'null')
 
@@ -180,14 +183,29 @@ def pull_request_items(fetch: Fetch, repository: str, me: str, rules, *, review:
     login = me.lstrip('@').lower()
     batch = {name.lstrip('@').lower() for name in batch_authors if name}
     items = []
+    memberships: dict[tuple[str, str], bool] = {}
+
+    def in_team(team) -> bool:
+        org = str((team.get('organization') or {}).get('login') or repository.split('/')[0])
+        slug = str(team.get('slug', ''))
+        if not slug:
+            return False
+        if (org, slug) not in memberships:
+            try:
+                answer = fetch(f'orgs/{quote(org, safe="")}/teams/{quote(slug, safe="")}/memberships/{quote(login, safe="")}')
+            except LookupError:  # 404: not a member, or the team is not visible to you
+                answer = None
+            memberships[(org, slug)] = isinstance(answer, dict) and answer.get('state') == 'active'
+        return memberships[(org, slug)]
+
     for pull in _pages(fetch, f'repos/{repository}/pulls?state=open'):
-        if pull.get('draft'):
-            continue
+        draft = bool(pull.get('draft'))
         labels = {str(label.get('name', '')).lower() for label in pull.get('labels') or [] if isinstance(label, dict)}
         files = None
-        if RECORDS_LABEL not in labels:
+        if RECORDS_LABEL not in labels or draft:
             # The live repository had no `records` label and the batch PR carried none, so a PR
-            # that changes record files counts as a records PR too.
+            # that changes record files counts as a records PR too. ai-dlc `propose` opens drafts:
+            # a draft counts when it changes record files, label or not.
             files = _pages(fetch, f'repos/{repository}/pulls/{int(pull["number"])}/files')
             if not any(_is_record_path(str(f.get('filename', '')), record_roots) for f in files):
                 continue
@@ -199,6 +217,8 @@ def pull_request_items(fetch: Fetch, repository: str, me: str, rules, *, review:
             why = 'requested reviewer'
         elif author == login:
             why = 'author'
+        elif any(in_team(t) for t in pull.get('requested_teams') or [] if isinstance(t, dict)):
+            why = 'member of a requested team'
         elif author in batch:
             why = 'reviewer of the batch'
         else:
@@ -216,12 +236,13 @@ def pull_request_items(fetch: Fetch, repository: str, me: str, rules, *, review:
         number = int(pull['number'])
         title = str(pull.get('title') or f'Pull request #{number}')
         items.append({
-            'key': f'pr:{repository.lower()}#{number}', 'review_kind': 'pull_request',
-            'title': f'Review records PR #{number}: {title}', 'url': pull.get('html_url'),
+            'key': f'pr:{repository.lower()}#{number}', 'review_kind': 'pull_request', 'draft': draft,
+            'title': f'Review {"draft " if draft else ""}records PR #{number}: {title}', 'url': pull.get('html_url'),
             'opened_at': opened.isoformat(), 'due_at': (opened + REVIEW_WINDOW).isoformat(),
-            'body': f'Open records pull request #{number} in {repository}, waiting on you as {why}. '
+            'body': f'Open {"draft " if draft else ""}records pull request #{number} in {repository}, '
+                    f'waiting on you as {why}. The 48-hour clock runs from when it was opened, draft or not. '
                     'Review it on GitHub; Work Copilot never approves or merges.',
-            'revision': _revision(number, title, opened.isoformat(), why),
+            'revision': _revision(number, title, opened.isoformat(), why, draft),
         })
     return items
 

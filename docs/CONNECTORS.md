@@ -93,7 +93,7 @@ From the selected vault, only lines starting with `>>` are exported. They form o
 
 `work-copilot review-queue --repo <local clone> --github <owner/repo> --me <GitHub login>` puts what waits on you in "Needs you" as `review` obligations, each with its age:
 
-- open records PRs, due 48 hours after opening. A records PR is labelled `records` or changes Markdown under the check roots or `inbox/`. With `--review all` (the default, for a personal repository) every one is listed, since the nightly batch opens them under your account. With `--review assigned` (a team repository) only those that request you, that you code-own, that you opened, or that a `--batch-author` opened;
+- open records PRs, due 48 hours after opening. A records PR is labelled `records` or changes Markdown under the check roots or `inbox/`. With `--review all` (the default, for a personal repository) every one is listed, since the nightly batch opens them under your account. With `--review assigned` (a team repository) only those that request you or a team you belong to, that you code-own, that you opened, or that a `--batch-author` opened. Drafts count when they change record files, since ai-dlc `propose` opens drafts; the card shows the draft and the clock runs from opening;
 - records under the check roots that you own (`--owner`, else `--me`) whose `stale_after` has passed;
 - inbox Source records still `raw` after 25 days, five days before they expire.
 

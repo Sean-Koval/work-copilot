@@ -79,10 +79,17 @@ class FakeGitHub:
         self.files = {2: ['team/conventions/branch-names.md'], 3: ['team/decisions/x.md'], 4: ['README.md'],
                       8: ['projects/hangar/decisions/a.md', 'team/sources/kan-1.md']}
         self.calls = []
+        self.teams = {('example-org', 'knowledge-reviewers'): {'state': 'active'}}
 
     def __call__(self, path):
         self.calls.append(path)
         route = path.split('?')[0]
+        if route.startswith('orgs/'):
+            _, org, _, slug, _, user = route.split('/')
+            assert user == ME
+            if (org, slug) not in self.teams:
+                raise LookupError(route)  # what gh_reader raises on HTTP 404
+            return self.teams[(org, slug)]
         if route == f'repos/{REPO}/pulls':
             return list(self.pulls)
         number = int(route.split('/')[4])
@@ -174,7 +181,7 @@ def test_collect_never_writes_to_any_external_system(store, knowledge, monkeypat
     assert _tree(knowledge) == before
     # Only list reads: open pulls and a pull's files.
     assert github.calls and all(c.startswith(f'repos/{REPO}/pulls') and 'state=' in c or c.split('?')[0].endswith('/files')
-                                for c in github.calls)
+                                or c.startswith('orgs/') and '/memberships/' in c for c in github.calls)
 
 
 def test_gh_reader_only_issues_get_requests():
@@ -234,13 +241,45 @@ def test_module_has_no_write_verbs():
 def test_personal_repo_review_all_lists_every_open_records_pr(store, knowledge):
     github = FakeGitHub()
     github.pulls.append(_pull(5, author=ME))                      # the batch, under the owner's own account
-    github.pulls.append({**_pull(6), 'draft': True})               # drafts are not ready for review
+    github.pulls.append({**_pull(6), 'draft': True})               # a labelled draft that changes no records
     result = _collect(store, knowledge, github, review='all')
     prs = sorted(k for k in _queue(store) if k.startswith('review:pr:'))
     assert prs == [f'review:pr:{REPO}#{n}' for n in (1, 2, 3, 5)]
     assert result['open'] == 6
-    # Labelled PRs need no file read when every records PR counts; only unlabelled #4 is checked.
-    assert [c.split('?')[0] for c in github.calls if '/files' in c] == [f'repos/{REPO}/pulls/4/files']
+    # Labelled non-drafts need no file read when every records PR counts.
+    assert [c.split('?')[0] for c in github.calls if '/files' in c] == [f'repos/{REPO}/pulls/{n}/files' for n in (4, 6)]
+
+
+def test_draft_prs_that_change_records_are_listed_with_the_clock_from_created_at(store, knowledge):
+    # ai-dlc `propose` always opens records PRs as drafts.
+    github = FakeGitHub()
+    github.pulls = [{**_pull(10, labels=(), author=ME, hours=60), 'draft': True}]
+    github.files[10] = ['team/decisions/new-decision.md']
+    _collect(store, knowledge, github, review='all')
+    pr = _queue(store)[f'review:pr:{REPO}#10']
+    assert pr['draft'] is True and pr['title'].startswith('Review draft records PR #10')
+    assert pr['age_hours'] == 60.0
+    assert pr['due_at'] == (NOW - timedelta(hours=12)).isoformat()
+    assert _brief_obligation(pr)['draft'] is True
+    # Marked ready later: same obligation, no longer a draft, same clock.
+    github.pulls = [_pull(10, labels=(), author=ME, hours=60)]  # same created_at
+    store.clock['now'] = NOW + timedelta(hours=1)
+    _collect(store, knowledge, github, review='all')
+    ready = _queue(store)[f'review:pr:{REPO}#10']
+    assert ready['id'] == pr['id'] and ready['draft'] is False and ready['due_at'] == pr['due_at']
+
+
+def test_assigned_mode_counts_requested_teams_i_belong_to(store, knowledge):
+    github = FakeGitHub()
+    team = lambda slug: {'slug': slug, 'organization': {'login': 'example-org'}}  # noqa: E731
+    github.pulls = [{**_pull(11, author='teammate'), 'requested_teams': [team('knowledge-reviewers')]},
+                    {**_pull(12, author='teammate'), 'requested_teams': [team('other-team')]},
+                    {**_pull(13, author='teammate'), 'requested_teams': [team('knowledge-reviewers')]}]
+    _collect(store, knowledge, github, review='assigned')
+    assert sorted(k for k in _queue(store) if k.startswith('review:pr:')) == [f'review:pr:{REPO}#{n}' for n in (11, 13)]
+    membership = [c for c in github.calls if c.startswith('orgs/')]
+    assert membership == ['orgs/example-org/teams/knowledge-reviewers/memberships/reviewer-me',
+                          'orgs/example-org/teams/other-team/memberships/reviewer-me']  # cached per team
 
 
 def test_team_repo_adds_my_own_and_batch_bot_prs_to_assigned_ones(store, knowledge):
@@ -288,3 +327,14 @@ def test_unlabelled_pr_that_changes_records_counts_as_a_records_pr(store, knowle
     github.files[9] = ['README.md', '.github/workflows/check.yml']
     _collect(store, knowledge, github, review='all')
     assert sorted(k for k in _queue(store) if k.startswith('review:pr:')) == [f'review:pr:{REPO}#8']
+
+
+def test_gh_reader_maps_404_to_lookup_error():
+    class Result:
+        returncode = 1
+        stdout = ''
+        stderr = 'gh: Not Found (HTTP 404)'
+
+    fetch = gh_reader(runner=lambda argv, **kwargs: Result(), executable='gh')
+    with pytest.raises(LookupError):
+        fetch('orgs/example-org/teams/x/memberships/reviewer-me')
