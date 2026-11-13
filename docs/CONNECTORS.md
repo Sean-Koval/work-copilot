@@ -89,6 +89,17 @@ Export is idempotent. De-duplication hashes the whole exported envelope except `
 
 From the selected vault, only lines starting with `>>` are exported. They form one Source per day: the date in the note's file name, else the capture date. Unmarked lines never leave the vault.
 
+### Customer repositories
+
+The destination's `knowledge.toml` decides which Sources it receives, so customer chat never reaches the team repository (KAN-489, ai-dlc ADR 0007). A source's customer is the Work Copilot project its room is bound to.
+
+- A customer repository declares `[repo] boundary = "customer"` and `project`. It receives only Sources bound to that project alone, written with `scope: project`, `boundary: customer` and `project`.
+- A team repository that lists `[[transcripts.customers]]` receives no Source bound to a customer project. Once any customer is listed, it also skips a Source bound to no project, since an unbound room may be a customer's. Bind the room to a project to export it.
+- Marked note lines are your own words, so they go to the team unless their note is bound to a customer project.
+- A malformed `[repo]` or customer list exports nothing.
+
+Run export once per repository: once with `--to` the team checkout, and once per customer checkout. The result lists each skipped Source under `skipped`, by record id and reason, never by title.
+
 ## Review queue from a knowledge repository
 
 `work-copilot review-queue --repo <local clone> --github <owner/repo> --me <GitHub login>` puts what waits on you in "Needs you" as `review` obligations, each with its age:

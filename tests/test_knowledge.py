@@ -21,9 +21,9 @@ from work_copilot.store import Store
 from work_copilot.vault import capture_vault
 
 CONTRACT = Path(__file__).parent / 'contracts' / 'knowledge-record.schema.json'
-# ai-dlc contracts/knowledge-record.schema.json at commit e5d535622dbb (PR #256, KAN-421).
+# ai-dlc contracts/knowledge-record.schema.json at main c10ba3b3 (adds boundary `project`, KAN-457/475).
 # Refresh the copy and this hash together when the contract changes.
-CONTRACT_SHA256 = '0a7633d88024a668140a6d658f09f5d11bf7e26b8ff09368abd82d17ddcd9bd7'
+CONTRACT_SHA256 = 'eda789937b670f3bc527ebffc366464af650bf3464defab33e084b0409444f59'
 FIXTURES = Path(__file__).parent / 'fixtures' / 'knowledge_export'
 NOW = datetime(2026, 11, 12, 18, 0, tzinfo=timezone.utc)
 SOURCES = [
@@ -269,3 +269,124 @@ def test_mcp_write_tools_have_typed_inputs(tmp_path):
     assert {'owner', 'status', 'question_state', 'due_at'} <= set(review['properties'])
     project = fields('update_project', 'changes')
     assert set(project['properties']) == {'name', 'aliases', 'rooms'}
+
+
+# --- Customer boundary (KAN-489) ----------------------------------------------
+
+CUSTOMER_SOURCES = [
+    {'id': 'symphony:tenant:thread:alpha-1', 'revision': '1', 'provider': 'symphony', 'title': 'ALPHA-TITLE outage room',
+     'body': 'ALPHA-BODY: the cutover moves to Saturday.', 'observed_at': '2026-11-11T10:00:00+00:00',
+     'projects': [{'id': 'alpha', 'name': 'Alpha'}], 'obligations': []},
+    {'id': 'symphony:tenant:thread:mixed-2', 'revision': '1', 'provider': 'symphony', 'title': 'MIXED-TITLE',
+     'body': 'MIXED-BODY: shared room for alpha and atlas.', 'observed_at': '2026-11-11T11:00:00+00:00',
+     'projects': [{'id': 'alpha', 'name': 'Alpha'}, {'id': 'atlas', 'name': 'Atlas'}], 'obligations': []},
+    {'id': 'symphony:tenant:thread:unbound-3', 'revision': '1', 'provider': 'symphony', 'title': 'UNBOUND-TITLE',
+     'body': 'UNBOUND-BODY: a room bound to no project.', 'observed_at': '2026-11-11T12:00:00+00:00',
+     'projects': [], 'obligations': []},
+    {'id': 'symphony:tenant:thread:beta-4', 'revision': '1', 'provider': 'symphony', 'title': 'BETA-TITLE',
+     'body': 'BETA-BODY: another customer.', 'observed_at': '2026-11-11T13:00:00+00:00',
+     'projects': [{'id': 'beta', 'name': 'Beta'}], 'obligations': []},
+]
+TEAM_TOML = '''[transcripts]
+owner = "sean"
+
+[[transcripts.customers]]
+project = "alpha"
+titles = ["Alpha"]
+
+[[transcripts.customers]]
+project = "beta"
+titles = ["Beta"]
+'''
+
+
+def _customer_repo(tmp_path, project='alpha'):
+    root = tmp_path / f'{project}-knowledge'
+    (root / 'inbox').mkdir(parents=True)
+    (root / 'knowledge.toml').write_text(
+        f'[format]\nversion = 1\n\n[repo]\nboundary = "customer"\nproject = "{project}"\n', encoding='utf-8')
+    return root.resolve()
+
+
+def _text(root):
+    return '\n'.join(p.read_text(encoding='utf-8') for p in inbox_files(root))
+
+
+@pytest.fixture
+def customer_store(tmp_path):
+    value = Store(tmp_path / 'c.db', now=lambda: NOW, timezone_name='UTC')
+    value.ingest([dict(s) for s in SOURCES + CUSTOMER_SOURCES])
+    yield value
+    value.close()
+
+
+def test_team_repository_never_receives_customer_or_unbound_sources(customer_store, repo):
+    (repo / 'knowledge.toml').write_text(TEAM_TOML, encoding='utf-8')
+    result = export_sources(customer_store, repo, owner='sean', now=NOW)
+    text = _text(repo)
+    for marker in ('ALPHA', 'MIXED', 'UNBOUND', 'BETA'):
+        assert marker not in text
+    # Atlas is not a customer, so its thread goes; the transcript is bound to no project, so it does not.
+    assert 'Ticket naming thread' in text and 'Weekly planning call' not in text
+    assert 'Pin the harness by digest' in text  # marked notes are the user's own words
+    reasons = {item['reason'] for item in result['skipped']}
+    assert any('customer project' in r for r in reasons) and any('no project' in r for r in reasons)
+    assert len(result['skipped']) == 5
+    # The report names a skipped Source by record id only: no title, no source id.
+    report = json.dumps(result)
+    for marker in ('ALPHA', 'MIXED', 'UNBOUND', 'BETA', 'thread:alpha', 'Weekly planning'):
+        assert marker not in report
+
+
+def test_customer_repository_receives_only_its_own_sources(customer_store, tmp_path):
+    alpha = _customer_repo(tmp_path)
+    result = export_sources(customer_store, alpha, owner='sean', scope='team', now=NOW)
+    text = _text(alpha)
+    assert 'ALPHA-BODY' in text
+    for marker in ('MIXED', 'UNBOUND', 'BETA', 'Ticket naming', 'Weekly planning', 'Pin the harness'):
+        assert marker not in text
+    assert result['customer'] == 'alpha' and len(result['written']) == 1
+    front = parse_frontmatter((alpha / 'inbox' / result['written'][0]).read_text(encoding='utf-8'))
+    assert (front['scope'], front['boundary'], front['project']) == ('project', 'customer', 'alpha')
+    assert record_errors(alpha / 'inbox' / result['written'][0]) == []
+    assert 'ALPHA' not in json.dumps(result['skipped'])
+
+
+def test_customer_marked_notes_stay_with_the_customer(tmp_path, repo):
+    vault = tmp_path / 'vault'
+    (vault / 'Daily').mkdir(parents=True)
+    (vault / 'Daily' / '2026-11-12.md').write_text('>> Team note: pin the harness\n', encoding='utf-8')
+    store = Store(tmp_path / 'v.db', timezone_name='UTC')
+    capture_vault(store, vault.resolve())
+    [note] = [s for s in store.list_sources() if s['provider'] == 'vault']
+    store.ingest([dict(note, id=note['id'] + ':alpha', revision='r2', title='Daily/2026-11-12 alpha.md',
+                       body='L1: >> ALPHA-NOTE: the cutover moves', projects=[{'id': 'alpha', 'name': 'Alpha'}])])
+    (repo / 'knowledge.toml').write_text(TEAM_TOML, encoding='utf-8')
+    export_sources(store, repo, owner='sean', now=NOW)
+    assert 'Team note' in _text(repo) and 'ALPHA-NOTE' not in _text(repo)
+    alpha = _customer_repo(tmp_path)
+    export_sources(store, alpha, owner='sean', now=NOW)
+    assert 'ALPHA-NOTE' in _text(alpha) and 'Team note' not in _text(alpha)
+    store.close()
+
+
+@pytest.mark.parametrize('toml, message', [
+    ('[repo]\nboundary = "team"\nproject = "alpha"\n', 'boundary'),
+    ('[repo]\nboundary = "customer"\n', 'project'),
+    ('[repo]\nboundary = "customer"\nproject = "Alpha Corp"\n', 'project'),
+    ('[repo]\nbondary = "customer"\nproject = "alpha"\n', 'boundary'),
+    ('[[transcripts.customers]]\ntitles = ["Alpha"]\n', 'project'),
+    ('[transcripts]\ncustomers = "alpha"\n', 'list'),
+    ('[repo\n', 'TOML'),
+])
+def test_a_malformed_declaration_exports_nothing(customer_store, repo, toml, message):
+    (repo / 'knowledge.toml').write_text(toml, encoding='utf-8')
+    with pytest.raises(ValueError, match=message):
+        export_sources(customer_store, repo, owner='sean', now=NOW)
+    assert not (repo / 'inbox').exists()
+
+
+def test_without_customer_rules_the_team_export_is_unchanged(customer_store, repo):
+    result = export_sources(customer_store, repo, owner='sean', now=NOW)
+    assert result['skipped'] == [] and result['customer'] is None
+    assert 'UNBOUND-BODY' in _text(repo)

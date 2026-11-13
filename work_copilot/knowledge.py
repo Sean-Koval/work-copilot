@@ -17,6 +17,19 @@ did not just create. Per source it writes two new files:
 
 Inbox items are candidates for 30 days (``stale_after``). Retention, numbering and
 promotion belong to the knowledge repository's own workflow.
+
+Customer boundary (KAN-489, ai-dlc ADR 0007). The destination's ``knowledge.toml``
+decides what it may receive, and anything unclear is left out:
+
+* A customer repository declares ``[repo] boundary = "customer"`` and ``project``. It
+  receives only Sources whose Work Copilot projects are exactly that project, written
+  with ``scope: project``, ``boundary: customer`` and ``project``.
+* A team repository that lists ``[[transcripts.customers]]`` never receives a Source
+  bound to a customer project, nor, once any customer is listed, one bound to no
+  project: an unbound room may be a customer's. Marked note lines are the user's own
+  words and go unless their note is bound to a customer project.
+
+A Source left out is reported by its record id and a reason, never by its title.
 """
 from __future__ import annotations
 
@@ -25,6 +38,7 @@ import json
 import os
 import re
 import tempfile
+import tomllib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
@@ -53,6 +67,7 @@ _SUMMARY_LINES = 3
 _SUMMARY_CHARS = 400
 _DAY = re.compile(r'^(\d{4}-\d{2}-\d{2})')
 _LINE_LABEL = re.compile(r'^L\d+: ')
+_PROJECT = re.compile(r'^[a-z0-9]+(?:-[a-z0-9]+)*$')
 
 
 def _instant(value) -> datetime:
@@ -195,21 +210,27 @@ def parse_frontmatter(text: str) -> dict | None:
     return None
 
 
-def build_record(source: dict, *, owner: str, scope: str, day: str, raw_resource: str,
-                 raw_hash: str, exported_at: datetime, extra_sources=()) -> str:
-    """Render one Source record (frontmatter and summary body) for a source."""
-    envelope = contract_envelope(source)
+def project_ids(source: dict) -> list[str]:
+    """The Work Copilot project ids a source is bound to, in order, without repeats."""
     projects = []
     for project in source.get('projects') or []:
         target = project.get('id') if isinstance(project, dict) else None
         if isinstance(target, str) and target and target not in projects:
             projects.append(target)
+    return projects
+
+
+def build_record(source: dict, *, owner: str, scope: str, day: str, raw_resource: str,
+                 raw_hash: str, exported_at: datetime, extra_sources=(), customer: str | None = None) -> str:
+    """Render one Source record (frontmatter and summary body) for a source."""
+    envelope = contract_envelope(source)
+    projects = project_ids(source)
     stale = (exported_at + CANDIDATE_WINDOW).astimezone(timezone.utc)
     excerpt = summary(envelope['body'])
     fields = {
         'id': record_id(envelope['id'], envelope['provider']),
         'type': 'source',
-        'scope': scope,
+        'scope': 'project' if customer else scope,
         'status': 'raw',
         'date': day,
         'owner': owner,
@@ -224,6 +245,9 @@ def build_record(source: dict, *, owner: str, scope: str, day: str, raw_resource
         'observed_at': envelope['observed_at'],
         'obligations': envelope['obligations'],
     }
+    if customer:
+        fields['boundary'] = 'customer'
+        fields['project'] = customer
     if excerpt:
         fields['description'] = excerpt.splitlines()[0][:200]
     if 'url' in envelope:
@@ -313,6 +337,55 @@ def knowledge_root(path) -> Path:
         raise ValueError(f'Knowledge repository path: {exc}') from None
 
 
+def destination_rules(root: Path) -> dict:
+    """What the knowledge repository at ``root`` may receive, from its ``knowledge.toml``.
+
+    ``{'customer': <project>}`` for a declared customer repository, otherwise
+    ``{'customer': None, 'customers': {<customer project>, ...}}``. A malformed file or
+    declaration raises, so nothing is exported on a guess.
+    """
+    path = root / 'knowledge.toml'
+    if path.is_symlink():
+        raise ValueError('knowledge.toml cannot be a symlink')
+    try:
+        parsed = tomllib.loads(path.read_text(encoding='utf-8')) if path.is_file() else {}
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
+        raise ValueError(f'knowledge.toml is not valid TOML: {exc}') from None
+    if 'repo' in parsed:
+        repo = parsed['repo']
+        project = repo.get('project') if isinstance(repo, dict) else None
+        if not isinstance(repo, dict) or repo.get('boundary') != 'customer' or not (
+                isinstance(project, str) and _PROJECT.fullmatch(project)):
+            raise ValueError('knowledge.toml [repo] must declare boundary = "customer" and a project slug')
+        return {'customer': project}
+    transcripts = parsed.get('transcripts', {})
+    rules = transcripts.get('customers', []) if isinstance(transcripts, dict) else None
+    if not isinstance(rules, list):
+        raise ValueError('knowledge.toml [[transcripts.customers]] must be a list of tables')
+    customers = set()
+    for rule in rules:
+        project = rule.get('project') if isinstance(rule, dict) else None
+        if not isinstance(project, str) or not project.strip():
+            raise ValueError('every [[transcripts.customers]] rule needs a project')
+        customers.add(project.strip())
+    return {'customer': None, 'customers': customers}
+
+
+def left_out(projects: list[str], rules: dict, *, note: bool = False) -> str | None:
+    """Why a source bound to ``projects`` may not go to this destination, or ``None``."""
+    customer = rules['customer']
+    if customer:
+        if set(projects) == {customer}:
+            return None
+        return 'not bound to this customer project alone'
+    customers = rules['customers']
+    if customers & set(projects):
+        return "bound to a customer project; export it to that customer's repository"
+    if customers and not projects and not note:
+        return 'bound to no project; bind its room to a project in Work Copilot'
+    return None
+
+
 def export_sources(store, destination, *, owner: str, since: str | None = None,
                    scope: str = 'personal', now: datetime | None = None) -> dict:
     """Write Source records for captured sources into ``<destination>/inbox/``.
@@ -328,6 +401,7 @@ def export_sources(store, destination, *, owner: str, since: str | None = None,
     cutoff = _instant(since) if since else None
     moment = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     root = knowledge_root(destination)
+    rules = destination_rules(root)
     inbox = _directory(root / 'inbox')
     raw = _directory(inbox / 'raw')
 
@@ -335,12 +409,17 @@ def export_sources(store, destination, *, owner: str, since: str | None = None,
         return cutoff is None or _instant(source['observed_at']) >= cutoff
 
     current = [s for s in store.list_sources() if not s.get('deleted') and recent(s)]
-    pending = []
+    pending, skipped = [], []
     for source in current:
         if source['provider'] in _NOT_CAPTURED or source['provider'] == 'vault':
             continue
+        reason = left_out(project_ids(source), rules)
+        if reason:
+            skipped.append({'record': record_id(source['id'], source['provider']), 'reason': reason})
+            continue
         pending.append((source, store._calendar_date(source['observed_at']), []))
-    for envelope, origins in marked_note_envelopes(store, [s for s in current if s['provider'] == 'vault']):
+    notes = [s for s in current if s['provider'] == 'vault' and not left_out(project_ids(s), rules, note=True)]
+    for envelope, origins in marked_note_envelopes(store, notes):
         pending.append((envelope, envelope['day'], origins))
 
     written, unchanged, raw_written = [], [], []
@@ -361,8 +440,8 @@ def export_sources(store, destination, *, owner: str, since: str | None = None,
             raise ValueError(f'inbox/raw/{raw_name} does not match its sha256; not overwriting it')
         record = build_record(source, owner=owner.strip(), scope=scope, day=day,
                               raw_resource=f'inbox/raw/{raw_name}', raw_hash=digest,
-                              exported_at=moment, extra_sources=origins)
+                              exported_at=moment, extra_sources=origins, customer=rules['customer'])
         _write(target, record.encode('utf-8'))
         written.append(name)
-    return {'inbox': str(inbox), 'written': written, 'unchanged': unchanged,
-            'raw_written': raw_written, 'external_writes': False}
+    return {'inbox': str(inbox), 'customer': rules['customer'], 'written': written, 'unchanged': unchanged,
+            'raw_written': raw_written, 'skipped': skipped, 'external_writes': False}
