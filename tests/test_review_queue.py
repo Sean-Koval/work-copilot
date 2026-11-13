@@ -270,11 +270,12 @@ def test_serving_app_refreshes_the_queue_on_the_collector_cadence(tmp_path, know
     settings = {'repo': knowledge, 'me': ME, 'owner': None, 'github': REPO, 'review': 'all', 'batch_authors': ()}
     app = create_app(tmp_path / 'data', review_queue=settings)
     with TestClient(app, base_url='http://127.0.0.1:8765') as client:
-        for _ in range(100):
-            if calls:
+        # The worker records the call before the collect commits; wait for the result itself.
+        for _ in range(200):
+            state = client.get('/api/state').json()
+            if len(state['review_queue']) == 5:
                 break
             asyncio.run(asyncio.sleep(0.05))
-        state = client.get('/api/state').json()
     assert calls and calls[0]['review'] == 'all'
     assert state['runtime']['review_queue_configured'] is True
     assert len(state['review_queue']) == 5  # PRs 1-3, the overdue record, the old Source
