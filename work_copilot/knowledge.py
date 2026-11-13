@@ -22,8 +22,8 @@ Customer boundary (KAN-489, ai-dlc ADR 0007). The destination's ``knowledge.toml
 decides what it may receive, and anything unclear is left out:
 
 * The destination must have a ``knowledge.toml``; a folder without one gets nothing.
-* A source's projects are its own and those its room is bound to, compared after
-  trimming and casefolding, so ``Alpha`` and ``alpha`` are one project.
+* A source's projects are its own and those its room is bound to, compared in the
+  shape of ai-dlc's slug, so ``Acme Corp`` and ``acme-corp`` are one project.
 * A customer repository declares ``[repo] boundary = "customer"`` and ``project``. It
   receives only Sources whose projects are exactly that project, written with
   ``scope: project``, ``boundary: customer`` and ``project``.
@@ -225,8 +225,11 @@ def project_ids(source: dict) -> list[str]:
 
 
 def _key(project: str) -> str:
-    """A project id as the boundary compares it: NFKC, trimmed, casefolded."""
-    return unicodedata.normalize('NFKC', project).strip().casefold()
+    """A project id in the shape of ai-dlc's slug: NFKC, casefolded, every run of
+    other characters one ``-``. ``Acme Corp`` and ``acme-corp`` are one project, so a
+    near match counts as the customer and fails closed."""
+    folded = unicodedata.normalize('NFKC', project).casefold()
+    return re.sub(r'[^a-z0-9]+', '-', folded).strip('-')
 
 
 def room_projects(store) -> dict[str, list[str]]:

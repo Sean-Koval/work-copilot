@@ -394,7 +394,7 @@ def test_without_customer_rules_the_team_export_is_unchanged(customer_store, rep
     assert 'UNBOUND-BODY' in _text(repo)
 
 
-@pytest.mark.parametrize('spelling', ['Alpha', ' alpha ', 'ALPHA', '\uff41lpha'])
+@pytest.mark.parametrize('spelling', ['Alpha', ' alpha ', 'ALPHA', '\uff41lpha', 'Alpha!'])
 def test_a_differently_written_customer_id_is_still_the_customer(tmp_path, repo, spelling):
     store = Store(tmp_path / 'k.db', now=lambda: NOW, timezone_name='UTC')
     store.ingest([dict(CUSTOMER_SOURCES[0], projects=[{'id': spelling, 'name': 'Alpha'}])])
@@ -414,6 +414,18 @@ def test_a_customer_room_stays_the_customers_whatever_the_payload_says(tmp_path,
     result = export_sources(store, repo, owner='sean', now=NOW)
     assert 'ALPHA' not in _text(repo)
     assert result['written'] == [] and 'customer project' in result['skipped'][0]['reason']
+    store.close()
+
+
+def test_a_room_bound_to_a_differently_written_customer_is_the_customers(tmp_path, repo):
+    store = Store(tmp_path / 'a.db', now=lambda: NOW, timezone_name='UTC')
+    store.create_project('Acme Corp', 'Acme', rooms=[{'id': 'room-acme', 'name': 'Acme room'}])
+    store.ingest([dict(CUSTOMER_SOURCES[0], room_id='room-acme', projects=[])])
+    (repo / 'knowledge.toml').write_text('[[transcripts.customers]]\nproject = "acme-corp"\n', encoding='utf-8')
+    result = export_sources(store, repo, owner='sean', now=NOW)
+    assert 'ALPHA' not in _text(repo) and 'customer project' in result['skipped'][0]['reason']
+    acme = _customer_repo(tmp_path, 'acme-corp')
+    assert len(export_sources(store, acme, owner='sean', now=NOW)['written']) == 1
     store.close()
 
 

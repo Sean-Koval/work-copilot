@@ -93,11 +93,11 @@ From the selected vault, only lines starting with `>>` are exported. They form o
 
 The destination's `knowledge.toml` decides which Sources it receives, so customer chat never reaches the team repository (KAN-489, ai-dlc ADR 0007). A folder without a regular `knowledge.toml` file receives nothing.
 
-A Source's projects are its own and those its room is bound to in Work Copilot. A customer's room stays the customer's whatever the payload says. Ids are compared trimmed and casefolded, so `Alpha` and `alpha` are one project.
+A Source's projects are its own and those its room is bound to in Work Copilot. A customer's room stays the customer's whatever the payload says. Name the Work Copilot project with the customer's ai-dlc slug. Ids are compared in that shape, casefolded with other characters as `-`, so `Acme Corp` also matches `acme-corp`.
 
 - A customer repository declares `[repo] boundary = "customer"` and `project`. It receives only Sources bound to that project alone, written with `scope: project`, `boundary: customer` and `project`.
 - A team repository that lists `[[transcripts.customers]]` receives no Source bound to a customer project. Once any customer is listed, it also skips a Source bound to no project, since an unbound room may be a customer's. Bind the room to a project to export it.
-- Marked note lines are your own words. They go to the team unless their note is bound to a customer project or names one.
+- Marked note lines are your own words. A `>>` line in a note bound to no project is team-visible, unless the note names a customer project. Bind a note about a customer to that project.
 - A malformed `[repo]` or customer list, or the retired `[[transcripts.projects]]`, exports nothing.
 - Export checks only what it writes. Records already in the team `inbox/` are not checked again.
 
