@@ -225,11 +225,12 @@ def project_ids(source: dict) -> list[str]:
 
 
 def _key(project: str) -> str:
-    """A project id in the shape of ai-dlc's slug: NFKC, casefolded, every run of
-    other characters one ``-``. ``Acme Corp`` and ``acme-corp`` are one project, so a
+    """A project id in the shape of ai-dlc's slug: casefolded, accents dropped, every
+    run of other characters one ``-``. An id of punctuation alone is no project. ``Acme Corp`` and ``acme-corp`` are one project, so a
     near match counts as the customer and fails closed."""
-    folded = unicodedata.normalize('NFKC', project).casefold()
-    return re.sub(r'[^a-z0-9]+', '-', folded).strip('-')
+    decomposed = unicodedata.normalize('NFKD', unicodedata.normalize('NFKC', project).casefold())
+    plain = ''.join(c for c in decomposed if not unicodedata.combining(c))
+    return re.sub(r'[^a-z0-9]+', '-', plain).strip('-')
 
 
 def room_projects(store) -> dict[str, list[str]]:
@@ -410,7 +411,7 @@ def left_out(projects: list[str], rules: dict, *, note: bool = False, named=()) 
     """Why a source bound to ``projects`` may not go to this destination, or ``None``.
 
     ``named`` are projects a note mentions without being bound to them."""
-    keys = {_key(project) for project in projects}
+    keys = {_key(project) for project in projects} - {''}
     customer = rules['customer']
     if customer:
         if keys == {customer}:

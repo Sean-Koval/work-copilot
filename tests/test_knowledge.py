@@ -417,7 +417,7 @@ def test_a_customer_room_stays_the_customers_whatever_the_payload_says(tmp_path,
     store.close()
 
 
-@pytest.mark.parametrize('spelling', ['Acme Corp', 'acme_corp', ' ACME-corp ', 'acme--corp'])
+@pytest.mark.parametrize('spelling', ['Acme Corp', 'acme_corp', ' ACME-corp ', 'acme--corp', '\u00c1cme Corp', 'Acme\u0301 Corp'])
 def test_spaces_and_underscores_in_an_id_still_match_the_customer_slug(tmp_path, repo, spelling):
     store = Store(tmp_path / 'u.db', now=lambda: NOW, timezone_name='UTC')
     store.ingest([dict(CUSTOMER_SOURCES[0], projects=[{'id': spelling, 'name': 'Acme'}])])
@@ -476,4 +476,13 @@ def test_an_unbound_note_that_names_a_customer_stays_out_of_the_team(tmp_path, r
     text = _text(repo)
     assert 'Team note' in text and 'ALPHA-NOTE' not in text
     assert 'names a customer project' in result['skipped'][0]['reason']
+    store.close()
+
+
+def test_an_id_of_punctuation_alone_is_no_project(tmp_path, repo):
+    store = Store(tmp_path / 'p.db', now=lambda: NOW, timezone_name='UTC')
+    store.ingest([dict(CUSTOMER_SOURCES[0], projects=[{'id': '!!!', 'name': 'Odd'}])])
+    (repo / 'knowledge.toml').write_text(TEAM_TOML, encoding='utf-8')
+    result = export_sources(store, repo, owner='sean', now=NOW)
+    assert 'ALPHA' not in _text(repo) and 'no project' in result['skipped'][0]['reason']
     store.close()
