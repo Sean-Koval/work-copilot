@@ -24,6 +24,7 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import json
+import logging
 import shutil
 import subprocess
 import tomllib
@@ -45,6 +46,11 @@ _CODEOWNERS = ('.github/CODEOWNERS', 'CODEOWNERS', 'docs/CODEOWNERS')
 _MAX_PAGES = 10
 
 Fetch = Callable[[str], object]
+log = logging.getLogger(__name__)
+
+
+class AccessDenied(LookupError):
+    """GitHub answered 403 for a read, for example a team membership the token cannot see."""
 
 
 # --- GitHub, read-only --------------------------------------------------------
@@ -64,6 +70,8 @@ def gh_reader(runner=subprocess.run, executable: str | None = None) -> Fetch:
         if result.returncode != 0:
             if 'HTTP 404' in (result.stderr or ''):
                 raise LookupError(path.split('?')[0])
+            if 'HTTP 403' in (result.stderr or ''):
+                raise AccessDenied(path.split('?')[0])
             raise RuntimeError('gh api GET failed for ' + path.split('?')[0] + '; check gh auth status')
         return json.loads(result.stdout or 'null')
 
@@ -184,6 +192,7 @@ def pull_request_items(fetch: Fetch, repository: str, me: str, rules, *, review:
     batch = {name.lstrip('@').lower() for name in batch_authors if name}
     items = []
     memberships: dict[tuple[str, str], bool] = {}
+    denied: list[str] = []
 
     def in_team(team) -> bool:
         org = str((team.get('organization') or {}).get('login') or repository.split('/')[0])
@@ -193,6 +202,11 @@ def pull_request_items(fetch: Fetch, repository: str, me: str, rules, *, review:
         if (org, slug) not in memberships:
             try:
                 answer = fetch(f'orgs/{quote(org, safe="")}/teams/{quote(slug, safe="")}/memberships/{quote(login, safe="")}')
+            except AccessDenied:  # 403: the token cannot read this team; skip it, keep going
+                if not denied:
+                    log.warning('Skipping requested teams whose membership GitHub would not show (HTTP 403)')
+                denied.append(slug)
+                answer = None
             except LookupError:  # 404: not a member, or the team is not visible to you
                 answer = None
             memberships[(org, slug)] = isinstance(answer, dict) and answer.get('state') == 'active'
