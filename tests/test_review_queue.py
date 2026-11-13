@@ -12,6 +12,7 @@ import pytest
 from work_copilot import review_queue
 from work_copilot.mcp_server import _brief_obligation
 from work_copilot.review_queue import (
+    AccessDenied,
     codeowner_rules,
     collect_review_queue,
     gh_reader,
@@ -80,6 +81,7 @@ class FakeGitHub:
                       8: ['projects/hangar/decisions/a.md', 'team/sources/kan-1.md']}
         self.calls = []
         self.teams = {('example-org', 'knowledge-reviewers'): {'state': 'active'}}
+        self.forbidden = set()
 
     def __call__(self, path):
         self.calls.append(path)
@@ -87,6 +89,8 @@ class FakeGitHub:
         if route.startswith('orgs/'):
             _, org, _, slug, _, user = route.split('/')
             assert user == ME
+            if slug in self.forbidden:
+                raise AccessDenied(route)  # what gh_reader raises on HTTP 403
             if (org, slug) not in self.teams:
                 raise LookupError(route)  # what gh_reader raises on HTTP 404
             return self.teams[(org, slug)]
@@ -337,4 +341,29 @@ def test_gh_reader_maps_404_to_lookup_error():
 
     fetch = gh_reader(runner=lambda argv, **kwargs: Result(), executable='gh')
     with pytest.raises(LookupError):
+        fetch('orgs/example-org/teams/x/memberships/reviewer-me')
+
+
+def test_team_membership_403_skips_that_team_with_one_warning(store, knowledge, caplog):
+    github = FakeGitHub()
+    github.forbidden = {'secret-team', 'other-secret'}
+    team = lambda slug: {'slug': slug, 'organization': {'login': 'example-org'}}  # noqa: E731
+    github.pulls = [{**_pull(11, author='teammate'), 'requested_teams': [team('secret-team'), team('knowledge-reviewers')]},
+                    {**_pull(12, author='teammate'), 'requested_teams': [team('other-secret')]},
+                    {**_pull(13, author='teammate'), 'requested_teams': [team('secret-team')]}]
+    with caplog.at_level('WARNING', logger='work_copilot.review_queue'):
+        result = _collect(store, knowledge, github, review='assigned')
+    assert result['open'] == 3  # PR 11 via the team I am in, plus the overdue record and the old Source
+    assert [k for k in _queue(store) if k.startswith('review:pr:')] == [f'review:pr:{REPO}#11']
+    assert [r.levelname for r in caplog.records] == ['WARNING']
+
+
+def test_gh_reader_maps_403_to_access_denied():
+    class Result:
+        returncode = 1
+        stdout = ''
+        stderr = 'gh: Must have admin rights (HTTP 403)'
+
+    fetch = gh_reader(runner=lambda argv, **kwargs: Result(), executable='gh')
+    with pytest.raises(AccessDenied):
         fetch('orgs/example-org/teams/x/memberships/reviewer-me')
