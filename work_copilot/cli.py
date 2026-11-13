@@ -17,7 +17,7 @@ def _run():
     parser.add_argument('--timezone',default=os.environ.get('WORK_COPILOT_TIMEZONE','UTC'),help='IANA timezone for Today/follow-ups; default UTC')
     parser.add_argument('--data-dir',type=Path,help='Private state directory (never a public repository)')
     sub=parser.add_subparsers(dest='command',required=True)
-    for name in ['init','demo','serve','capture','export','import','mcp','connect','collect','doctor','activity','drain-activity','smoke']:
+    for name in ['init','demo','serve','capture','export','import','mcp','connect','collect','doctor','activity','drain-activity','smoke','review-queue']:
         p=sub.add_parser(name)
         if name=='activity':
             p.add_argument('--file',type=Path,required=True,help='Structured local session event JSON; no trace scraping')
@@ -40,6 +40,11 @@ def _run():
             p.add_argument('--since',help='Export sources observed at or after this ISO timestamp with timezone')
             p.add_argument('--owner',default=os.environ.get('WORK_COPILOT_KNOWLEDGE_OWNER'),help='Record owner. Default: WORK_COPILOT_KNOWLEDGE_OWNER')
             p.add_argument('--scope',default='personal',choices=['personal','project','team'])
+        elif name=='review-queue':
+            p.add_argument('--repo',type=Path,default=os.environ.get('WORK_COPILOT_KNOWLEDGE_REPO'),help='Local clone of the knowledge repository (read only). Default: WORK_COPILOT_KNOWLEDGE_REPO')
+            p.add_argument('--github',default=os.environ.get('WORK_COPILOT_KNOWLEDGE_GITHUB'),help='owner/repo whose open records PRs to read with gh (GET only). Default: WORK_COPILOT_KNOWLEDGE_GITHUB')
+            p.add_argument('--me',default=os.environ.get('WORK_COPILOT_GITHUB_LOGIN'),help='Your GitHub login. Default: WORK_COPILOT_GITHUB_LOGIN')
+            p.add_argument('--owner',default=os.environ.get('WORK_COPILOT_KNOWLEDGE_OWNER'),help='Your record owner value, if it differs from --me. Default: WORK_COPILOT_KNOWLEDGE_OWNER')
         elif name=='import':
             p.add_argument('file',type=Path,help='Normalized JSON envelope or source array')
         elif name in {'connect','collect'}:
@@ -124,6 +129,11 @@ def _run():
         elif args.command=='export':
             from .vault import export_projects
             result=export_projects(store,args.vault)
+        elif args.command=='review-queue':
+            if args.repo is None:
+                raise ValueError('Give the local knowledge repository with --repo or WORK_COPILOT_KNOWLEDGE_REPO')
+            from .review_queue import collect_review_queue
+            result=collect_review_queue(store,args.repo,me=args.me or '',owner=args.owner,github=args.github)
         elif args.command=='import':
             payload=json.loads(args.file.read_text(encoding='utf-8'))
             items=payload if isinstance(payload,list) else payload['items']

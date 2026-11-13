@@ -192,6 +192,8 @@ class Store:
         refs = [self._source(row[0]) for row in self.db.execute('SELECT source_id FROM evidence WHERE obligation_id=? UNION SELECT source_id FROM manual_evidence WHERE obligation_id=?', (oid,oid))]
         ob['evidence'] = [s for s in refs if s and not s.get('deleted')]
         ob['freshness'] = self._freshness(ob['evidence'])
+        if ob.get('opened_at'):
+            ob['age_hours'] = round(max(0.0,(self.now()-_instant(ob['opened_at'])).total_seconds())/3600,1)
         return ob
 
     def _freshness(self, evidence):
@@ -206,7 +208,7 @@ class Store:
         return 'observed'
 
     def _put_obligation(self, ob):
-        clean = {k:v for k,v in ob.items() if k not in ('evidence','freshness')}
+        clean = {k:v for k,v in ob.items() if k not in ('evidence','freshness','age_hours')}
         self.db.execute('UPDATE obligations SET payload=? WHERE id=?', (_json(clean), ob['id']))
 
     def _connector(self, name):
@@ -426,7 +428,7 @@ class Store:
             week={'start':monday.isoformat(),'end':week_end,'commitments':[o for o in this_week if o['commitment']],'suggestions':[o for o in this_week if not o['commitment']],'overdue':overdue,'overdue_count':len(overdue),'undated':undated,'backlog':backlog,'undated_count':len(undated),'backlog_count':len(backlog)}
             refresh_row=self.db.execute("SELECT payload FROM local_metadata WHERE key='refresh_needed'").fetchone()
             refresh_needed=json.loads(refresh_row[0]) if refresh_row else {'needed':False}
-            return {'refresh_needed':refresh_needed,'timezone':self.timezone_name,'projects':[{**dict(p),**self._project_config(p['id'])} for p in self.db.execute('SELECT * FROM projects ORDER BY name')],'obligations':obligations,'drafts':self._drafts(),'connectors':self._rows('connectors'),'today':today,'week':week,'recent':sorted(self.list_sources(),key=lambda s:s['observed_at'],reverse=True)[:30],'review':[o for o in active if o['status']=='candidate' or not o.get('owner') or not o.get('project_id') or o.get('review_reason')],'coverage_note':'Only explicitly configured and observed sources are covered. Vendor semantics and upstream ACL enforcement are not guaranteed. Laptop sleep pauses capture.'}
+            return {'refresh_needed':refresh_needed,'timezone':self.timezone_name,'projects':[{**dict(p),**self._project_config(p['id'])} for p in self.db.execute('SELECT * FROM projects ORDER BY name')],'obligations':obligations,'drafts':self._drafts(),'connectors':self._rows('connectors'),'today':today,'week':week,'recent':sorted(self.list_sources(),key=lambda s:s['observed_at'],reverse=True)[:30],'review':[o for o in active if o.get('kind')!='review' and (o['status']=='candidate' or not o.get('owner') or not o.get('project_id') or o.get('review_reason'))],'review_queue':sorted([o for o in active if o.get('kind')=='review'],key=lambda o:(-o.get('age_hours',0),o['id'])),'coverage_note':'Only explicitly configured and observed sources are covered. Vendor semantics and upstream ACL enforcement are not guaranteed. Laptop sleep pauses capture.'}
 
     def draft(self, id):
         with self._transaction():
@@ -586,6 +588,54 @@ class Store:
             for sid in ids:
                 self.db.execute('INSERT OR IGNORE INTO manual_evidence VALUES(?,?)',(oid,sid))
             return self._obligation(oid)
+
+    def sync_review_queue(self, items, connector='knowledge-review', observed_at=None):
+        """Replace the read-only review queue with ``items``; absent items resolve themselves.
+
+        Each item becomes a source (its evidence) and an open ``review`` obligation owned by
+        the user. An item missing from a later collect is resolved, and reopens if it returns.
+        Nothing here writes outside the local store.
+        """
+        if not isinstance(items,list):
+            raise ValueError('Review queue items must be a list')
+        observed=observed_at or self.now().isoformat()
+        present=set(); opened=[]; reopened=[]; resolved=[]
+        fields=('title','review_kind','url','path','opened_at','due_at')
+        with self._transaction():
+            for item in items:
+                if not isinstance(item,dict) or not all(isinstance(item.get(k),str) and item[k] for k in ('key','title','body','revision','opened_at')):
+                    raise ValueError('Review items need key, title, body, revision and opened_at')
+                _instant(item['opened_at'])
+                self._validate_changes({k:item.get(k) for k in ('title','due_at')})
+                sid='review/'+item['key']
+                url=item.get('url') if isinstance(item.get('url'),str) and item['url'].startswith(('https://','http://')) else None
+                self.ingest([{'id':sid,'revision':item['revision'],'provider':connector,'title':item['title'],'body':item['body'],'url':url,'observed_at':observed}],connector=connector)
+                canonical=_json([None,'review:'+item['key']])
+                row=self.db.execute('SELECT id FROM obligations WHERE canonical=?',(canonical,)).fetchone()
+                values={k:item.get(k) for k in fields} | {'url':url}
+                if row:
+                    ob=self._obligation(row[0])
+                    changed={k:v for k,v in values.items() if ob.get(k)!=v}
+                    if ob['status']=='resolved' and ob.get('auto_resolved'):
+                        changed.update(status='open',auto_resolved=False,resolved_at=None)
+                        reopened.append(ob['id'])
+                    if changed:
+                        ob.update(changed); ob['revision']+=1
+                        self._put_obligation(ob)
+                    oid=ob['id']
+                else:
+                    oid=_id(canonical)
+                    ob={'id':oid,'intent_key':'review:'+item['key'],'kind':'review',**values,'project_id':None,'owner':'me','status':'open','question_state':'pending','follow_up_at':None,'waiting_on':None,'commitment':False,'revision':1,'created_at':self.now().isoformat(),'reviewed':True}
+                    self.db.execute('INSERT INTO obligations VALUES(?,?,?)',(oid,canonical,_json(ob)))
+                    opened.append(oid)
+                self.db.execute('INSERT OR IGNORE INTO evidence VALUES(?,?)',(oid,sid))
+                present.add(oid)
+            for ob in self._rows('obligations'):
+                if ob.get('kind')=='review' and ob['id'] not in present and ob['status'] not in ('resolved','dismissed'):
+                    ob.update(status='resolved',auto_resolved=True,resolved_at=self.now().isoformat(),revision=ob['revision']+1)
+                    self._put_obligation(ob)
+                    resolved.append(ob['id'])
+        return {'open':len(present),'opened':opened,'reopened':reopened,'resolved':resolved}
 
     def _project_config(self, id):
         row=self.db.execute('SELECT aliases,rooms,revision FROM project_config WHERE project_id=?',(id,)).fetchone()

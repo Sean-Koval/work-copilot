@@ -80,7 +80,7 @@ def _brief_source(source):
 
 
 def _brief_obligation(obligation):
-    return {key:(obligation.get(key)[:300] if key in {'title','review_reason'} and isinstance(obligation.get(key),str) else obligation.get(key)) for key in ('id','revision','intent_key','title','project_id','owner','status','question_state','follow_up_at','due_at','waiting_on','freshness','review_reason')} | {'evidence_ids':[s['id'] for s in obligation.get('evidence',[])[:1]],'evidence_total':len(obligation.get('evidence',[])),'evidence_truncated':len(obligation.get('evidence',[]))>1,'evidence_tool':'get_reply_context'}
+    return {key:(obligation.get(key)[:300] if key in {'title','review_reason'} and isinstance(obligation.get(key),str) else obligation.get(key)) for key in ('id','revision','intent_key','title','project_id','owner','status','question_state','follow_up_at','due_at','waiting_on','freshness','review_reason')} | {key:obligation[key] for key in ('kind','review_kind','url','path','opened_at','age_hours') if obligation.get(key) is not None} | {'evidence_ids':[s['id'] for s in obligation.get('evidence',[])[:1]],'evidence_total':len(obligation.get('evidence',[])),'evidence_truncated':len(obligation.get('evidence',[]))>1,'evidence_tool':'get_reply_context'}
 
 
 def _page(items, cursor, limit):
