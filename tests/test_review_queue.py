@@ -1,0 +1,229 @@
+"""Read-only review queue over a knowledge repository (KAN-468). GitHub is always a fake."""
+import hashlib
+import json
+import socket
+import subprocess
+import urllib.request
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+
+from work_copilot import review_queue
+from work_copilot.mcp_server import _brief_obligation
+from work_copilot.review_queue import (
+    codeowner_rules,
+    collect_review_queue,
+    gh_reader,
+    owners_of,
+)
+from work_copilot.store import Store
+
+NOW = datetime(2026, 11, 12, 18, 0, tzinfo=timezone.utc)
+ME = 'reviewer-me'
+REPO = 'example-org/knowledge'
+
+
+def _iso(moment):
+    return moment.isoformat().replace('+00:00', 'Z')
+
+
+def _record(path: Path, **fields):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    header = '\n'.join(f'{key}: {json.dumps(value)}' for key, value in fields.items())
+    path.write_text(f'---\n{header}\n---\n# {fields.get("title", path.stem)}\n', encoding='utf-8')
+
+
+@pytest.fixture
+def knowledge(tmp_path):
+    root = tmp_path.resolve() / 'knowledge'
+    (root / '.github').mkdir(parents=True)
+    (root / '.github' / 'CODEOWNERS').write_text('# conventions need the owner\n/team/conventions/ @Reviewer-Me\n', encoding='utf-8')
+    (root / 'knowledge.toml').write_text('[check]\nroots = ["team", "projects"]\n', encoding='utf-8')
+    past, future = _iso(NOW - timedelta(days=2)), _iso(NOW + timedelta(days=20))
+    base = {'scope': 'team', 'date': '2026-09-01', 'sources': [], 'links': []}
+    _record(root / 'team/decisions/DEC-0001.md', id='DEC-0001', type='decision', status='accepted', owner=ME,
+            title='Pin harness by digest', stale_after=past, **base)
+    _record(root / 'team/decisions/DEC-0002.md', id='DEC-0002', type='decision', status='accepted', owner=ME,
+            stale_after=future, **base)
+    _record(root / 'team/decisions/DEC-0003.md', id='DEC-0003', type='decision', status='accepted', owner='someone-else',
+            stale_after=past, **base)
+    _record(root / 'team/decisions/DEC-0004.md', id='DEC-0004', type='decision', status='superseded', owner=ME,
+            stale_after=past, **base)
+    _record(root / 'inbox/zoom-old--aa.md', id='zoom-old', type='source', status='raw', owner=ME, title='Planning call',
+            stale_after=_iso(NOW + timedelta(days=3)), **base)
+    _record(root / 'inbox/zoom-new--bb.md', id='zoom-new', type='source', status='raw', owner=ME,
+            stale_after=_iso(NOW + timedelta(days=20)), **base)
+    (root / 'inbox' / 'raw').mkdir()
+    (root / 'inbox' / 'raw' / 'sha256-x.txt').write_text('transcript', encoding='utf-8')
+    return root
+
+
+def _pull(number, *, labels=('records',), reviewers=(), author='batch-bot', hours=10):
+    return {'number': number, 'title': f'Records from meeting {number}', 'draft': False,
+            'html_url': f'https://github.com/{REPO}/pull/{number}', 'user': {'login': author},
+            'labels': [{'name': name} for name in labels], 'requested_reviewers': [{'login': r} for r in reviewers],
+            'created_at': _iso(NOW - timedelta(hours=hours))}
+
+
+class FakeGitHub:
+    """Answers the REST GETs the collector makes; records every path."""
+
+    def __init__(self):
+        self.pulls = [
+            _pull(1, reviewers=[ME], hours=50),                       # requested reviewer, over 48h
+            _pull(2, hours=5),                                        # code owner of a changed convention
+            _pull(3, reviewers=['someone-else']),                     # neither
+            _pull(4, labels=('docs',), reviewers=[ME]),               # not a records PR
+        ]
+        self.files = {2: ['team/conventions/branch-names.md'], 3: ['team/decisions/x.md']}
+        self.calls = []
+
+    def __call__(self, path):
+        self.calls.append(path)
+        route = path.split('?')[0]
+        if route == f'repos/{REPO}/pulls':
+            return list(self.pulls)
+        number = int(route.split('/')[4])
+        return [{'filename': name} for name in self.files.get(number, [])]
+
+
+def _tree(root: Path):
+    return {p.relative_to(root).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in sorted(root.rglob('*')) if p.is_file()}
+
+
+@pytest.fixture
+def store(tmp_path):
+    clock = {'now': NOW}
+    value = Store(tmp_path.resolve() / 'copilot.db', now=lambda: clock['now'])
+    value.clock = clock
+    yield value
+    value.close()
+
+
+def _collect(store, knowledge, github):
+    return collect_review_queue(store, knowledge, me=ME, github=REPO, fetch=github, now=store.clock['now'])
+
+
+def _queue(store):
+    return {o['intent_key']: o for o in store.snapshot()['review_queue']}
+
+
+def test_two_prs_an_overdue_record_and_an_old_source_make_four_obligations(store, knowledge):
+    result = _collect(store, knowledge, FakeGitHub())
+    assert result['open'] == 4 and result['external_writes'] is False
+    queue = _queue(store)
+    assert sorted(queue) == sorted([
+        f'review:pr:{REPO}#1', f'review:pr:{REPO}#2',
+        'review:record:team/decisions/DEC-0001.md', 'review:source:inbox/zoom-old--aa.md'])
+    for item in queue.values():
+        assert item['kind'] == 'review' and item['owner'] == 'me' and item['status'] == 'open'
+    pr = queue[f'review:pr:{REPO}#1']
+    assert pr['age_hours'] == 50.0
+    assert pr['due_at'] == (NOW - timedelta(hours=2)).isoformat()
+    assert pr['evidence'][0]['url'] == f'https://github.com/{REPO}/pull/1'
+    assert queue['review:source:inbox/zoom-old--aa.md']['age_hours'] == 27 * 24
+    assert queue['review:record:team/decisions/DEC-0001.md']['path'] == 'team/decisions/DEC-0001.md'
+    state = store.snapshot()
+    # Shown in "Needs you" (owned and open), not in the candidate review page.
+    assert all(o['kind'] != 'review' for o in state['review'])
+    assert state['review_queue'][0]['intent_key'] == 'review:source:inbox/zoom-old--aa.md'  # oldest first
+
+
+def test_closing_a_pr_resolves_it_on_the_next_collect_and_reopening_restores_it(store, knowledge):
+    github = FakeGitHub()
+    _collect(store, knowledge, github)
+    github.pulls = [p for p in github.pulls if p['number'] != 1]
+    store.clock['now'] = NOW + timedelta(hours=1)
+    result = _collect(store, knowledge, github)
+    assert result['open'] == 3 and len(result['resolved']) == 1
+    resolved = [o for o in store.snapshot()['obligations'] if o['status'] == 'resolved']
+    assert [o['intent_key'] for o in resolved] == [f'review:pr:{REPO}#1']
+    assert len(_queue(store)) == 3
+    github.pulls.append(_pull(1, reviewers=[ME], hours=50))
+    result = _collect(store, knowledge, github)
+    assert result['reopened'] and len(_queue(store)) == 4
+
+
+def test_moving_stale_after_or_processing_the_source_resolves_the_item(store, knowledge):
+    _collect(store, knowledge, FakeGitHub())
+    record = knowledge / 'team/decisions/DEC-0001.md'
+    record.write_text(record.read_text(encoding='utf-8').replace(
+        _iso(NOW - timedelta(days=2)), _iso(NOW + timedelta(days=90))), encoding='utf-8')
+    source = knowledge / 'inbox/zoom-old--aa.md'
+    (knowledge / 'processed').mkdir()
+    source.rename(knowledge / 'processed' / source.name)
+    result = _collect(store, knowledge, FakeGitHub())
+    assert result['open'] == 2 and len(result['resolved']) == 2
+
+
+def test_collect_never_writes_to_any_external_system(store, knowledge, monkeypatch):
+    def refuse(*args, **kwargs):
+        raise AssertionError('network or process call during collect')
+
+    monkeypatch.setattr(socket, 'create_connection', refuse)
+    monkeypatch.setattr(urllib.request, 'urlopen', refuse)
+    monkeypatch.setattr(subprocess, 'run', refuse)
+    monkeypatch.setattr(subprocess, 'Popen', refuse)
+    github = FakeGitHub()
+    before = _tree(knowledge)
+    _collect(store, knowledge, github)
+    assert _tree(knowledge) == before
+    # Only list reads: open pulls and a pull's files.
+    assert github.calls and all(c.startswith(f'repos/{REPO}/pulls') and 'state=' in c or c.split('?')[0].endswith('/files')
+                                for c in github.calls)
+
+
+def test_gh_reader_only_issues_get_requests():
+    seen = []
+
+    class Result:
+        returncode = 0
+        stdout = '[]'
+
+    def runner(argv, **kwargs):
+        seen.append(argv)
+        return Result()
+
+    fetch = gh_reader(runner=runner, executable='gh')
+    assert fetch(f'repos/{REPO}/pulls?state=open&per_page=100&page=1') == []
+    argv = seen[0]
+    assert argv[:4] == ['gh', 'api', '--method', 'GET']
+    assert not {'-f', '-F', '--field', '--raw-field', '--input', 'POST', 'PATCH', 'PUT', 'DELETE'} & set(argv)
+    for bad in ('/repos/x/y/pulls', 'https://api.github.com/x', 'repos/../user'):
+        with pytest.raises(ValueError):
+            fetch(bad)
+
+
+def test_codeowners_last_match_wins(knowledge):
+    rules = codeowner_rules(knowledge) + [('*.md', ['other'])]
+    assert owners_of(codeowner_rules(knowledge), 'team/conventions/a.md') == ['reviewer-me']
+    assert owners_of(codeowner_rules(knowledge), 'team/decisions/a.md') == []
+    assert owners_of(rules, 'team/conventions/a.md') == ['other']
+    assert owners_of([('/docs/', ['d'])], 'src/docs/x.md') == []
+    assert owners_of([('docs/', ['d'])], 'src/docs/x.md') == ['d']
+    assert owners_of([('conventions/', ['c'])], 'team/conventions/x.md') == ['c']
+
+
+def test_without_github_only_local_items_are_collected(store, knowledge):
+    result = collect_review_queue(store, knowledge, me=ME, now=NOW)
+    assert result['open'] == 2 and result['pull_requests_read'] is False
+    with pytest.raises(ValueError):
+        collect_review_queue(store, knowledge, me='', now=NOW)
+    with pytest.raises(ValueError):
+        collect_review_queue(store, knowledge, me=ME, github='not a repo', fetch=FakeGitHub(), now=NOW)
+
+
+def test_mcp_attention_exposes_kind_link_and_age(store, knowledge):
+    _collect(store, knowledge, FakeGitHub())
+    pr = _queue(store)[f'review:pr:{REPO}#1']
+    brief = _brief_obligation(pr)
+    assert brief['kind'] == 'review' and brief['review_kind'] == 'pull_request'
+    assert brief['url'].endswith('/pull/1') and brief['age_hours'] == 50.0
+
+
+def test_module_has_no_write_verbs():
+    text = Path(review_queue.__file__).read_text(encoding='utf-8')
+    for verb in ("'POST'", "'PATCH'", "'PUT'", "'DELETE'", 'write_text', 'write_bytes', 'unlink('):
+        assert verb not in text

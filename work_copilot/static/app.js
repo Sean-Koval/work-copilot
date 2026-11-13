@@ -84,11 +84,22 @@ function openSourceMap(source) {
   },'btn primary'));
   if (!dialog.open) dialog.showModal();
 }
+// Read-only review queue (KAN-468): age against the 48-hour review target. Work Copilot never approves or merges.
+function reviewAge(item) {
+  const hours = Number(item.age_hours || 0);
+  const age = hours < 48 ? `${Math.floor(hours)}h` : `${Math.floor(hours / 24)}d`;
+  const pr = item.review_kind === 'pull_request';
+  const late = pr ? hours >= 48 : !!item.due_at && new Date(item.due_at) <= new Date();
+  const note = late ? (pr ? ' · over the 48h review target' : ' · overdue') : '';
+  return tag(`Waiting ${age}${note}`, late ? 'warning' : 'neutral');
+}
 function obligationCard(item, reviewMode = false) {
   const card = $('article',`card ${item.owner === 'me' && item.status === 'open' ? 'emphasis' : ''}`);
   const meta = append($('div','card-meta'), $('span','project-label',projectName(item.project_id)), tag(readable(item.status), item.status === 'candidate' ? 'warning' : 'neutral'));
   if (item.commitment) meta.append(tag('Commitment'));
+  if (item.kind === 'review') meta.append(reviewAge(item));
   append(card, meta, $('h3','',item.title));
+  if (item.kind === 'review' && item.path) card.append($('p','subtle-note',`Knowledge repository: ${item.path}`));
   if (item.review_reason) card.append($('p','draft-warning',readable(item.review_reason)));
   if(item.waiting_on) card.append($('p','',`Waiting on: ${item.waiting_on}`));
   const owner = item.owner === 'me' ? 'You own this' : item.owner ? `Owner: ${item.owner}` : 'Ownership needs review';

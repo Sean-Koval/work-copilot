@@ -89,6 +89,18 @@ Export is idempotent. De-duplication hashes the whole exported envelope except `
 
 From the selected vault, only lines starting with `>>` are exported. They form one Source per day: the date in the note's file name, else the capture date. Unmarked lines never leave the vault.
 
+## Review queue from a knowledge repository
+
+`work-copilot review-queue --repo <local clone> --github <owner/repo> --me <GitHub login>` puts what waits on you in "Needs you" as `review` obligations, each with its age:
+
+- open PRs labelled `records` where you are a requested reviewer or a `CODEOWNERS` owner of a changed file, due 48 hours after opening;
+- records under the check roots that you own (`--owner`, else `--me`) whose `stale_after` has passed;
+- inbox Source records still `raw` after 25 days, five days before they expire.
+
+An item missing from the next run resolves itself, and reopens if it returns. Defaults come from `WORK_COPILOT_KNOWLEDGE_REPO`, `WORK_COPILOT_KNOWLEDGE_GITHUB`, `WORK_COPILOT_GITHUB_LOGIN` and `WORK_COPILOT_KNOWLEDGE_OWNER`. Without `--github`, only the local items are collected.
+
+The clone is only read. Pull requests are read with `gh api --method GET`, so `gh` holds the credentials. Work Copilot never approves, comments on or merges a PR. The MCP `get_attention` tool shows `kind`, `url`, `opened_at` and `age_hours`.
+
 ## Shared MCP server
 
 After installing the project, configure your agent's MCP client to execute the installed `work-copilot mcp` command with the same `--data-dir` used by the dashboard. Consult `work-copilot --help` for flag order. Alternatively invoke:
