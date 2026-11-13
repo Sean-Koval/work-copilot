@@ -2,8 +2,11 @@
 
 Three things wait on the user and become ``review`` obligations in "Needs you":
 
-* open pull requests labelled ``records`` where the user is a requested reviewer or a
-  code owner of a changed file, read from the GitHub REST API with GET only;
+* open pull requests labelled ``records``, read from the GitHub REST API with GET only:
+  all of them in a personal repository (``review='all'``), or in a team repository
+  those where the user is a requested reviewer, in a requested team, a code owner or
+  the author, and those the batch bot opened (``review='assigned'``). Drafts count
+  when they change record files, since ai-dlc ``propose`` opens drafts;
 * records under the check roots (``team/``, ``projects/``) that the user owns and
   whose ``stale_after`` (formerly ``review_by``) has passed;
 * inbox Source records still ``raw`` and older than 25 days, so they expire in 5.
@@ -31,6 +34,7 @@ from urllib.parse import quote
 
 CONNECTOR = 'knowledge-review'
 RECORDS_LABEL = 'records'
+REVIEW_MODES = ('all', 'assigned')
 REVIEW_WINDOW = timedelta(hours=48)
 SOURCE_WARNING_AGE = timedelta(days=25)
 SOURCE_WINDOW = timedelta(days=30)
@@ -58,6 +62,8 @@ def gh_reader(runner=subprocess.run, executable: str | None = None) -> Fetch:
         result = runner([binary, 'api', '--method', 'GET', path], capture_output=True, text=True,
                         encoding='utf-8', timeout=60, check=False)
         if result.returncode != 0:
+            if 'HTTP 404' in (result.stderr or ''):
+                raise LookupError(path.split('?')[0])
             raise RuntimeError('gh api GET failed for ' + path.split('?')[0] + '; check gh auth status')
         return json.loads(result.stdout or 'null')
 
@@ -159,18 +165,67 @@ def _revision(*parts) -> str:
 # --- Collectors ---------------------------------------------------------------
 
 
-def pull_request_items(fetch: Fetch, repository: str, me: str, rules) -> list[dict]:
-    """Open ``records`` PRs where ``me`` is a requested reviewer or a code owner."""
+def _is_record_path(path: str, roots) -> bool:
+    return path.split('/', 1)[0] in (*roots, 'inbox') and path.endswith('.md')
+
+
+def pull_request_items(fetch: Fetch, repository: str, me: str, rules, *, review: str = 'all',
+                       batch_authors=(), record_roots=DEFAULT_ROOTS) -> list[dict]:
+    """Open records PRs that wait on ``me``: labelled ``records``, or changing record files.
+
+    ``review='all'`` (the personal repository) lists every open ``records`` PR, because the
+    nightly batch opens them under the user's own account. ``review='assigned'`` (a team
+    repository) lists PRs where ``me`` is a requested reviewer or a code owner of a changed
+    file, plus PRs authored by ``me`` or by one of ``batch_authors``.
+    """
+    if review not in REVIEW_MODES:
+        raise ValueError('review must be one of ' + ', '.join(REVIEW_MODES))
     login = me.lstrip('@').lower()
+    batch = {name.lstrip('@').lower() for name in batch_authors if name}
     items = []
+    memberships: dict[tuple[str, str], bool] = {}
+
+    def in_team(team) -> bool:
+        org = str((team.get('organization') or {}).get('login') or repository.split('/')[0])
+        slug = str(team.get('slug', ''))
+        if not slug:
+            return False
+        if (org, slug) not in memberships:
+            try:
+                answer = fetch(f'orgs/{quote(org, safe="")}/teams/{quote(slug, safe="")}/memberships/{quote(login, safe="")}')
+            except LookupError:  # 404: not a member, or the team is not visible to you
+                answer = None
+            memberships[(org, slug)] = isinstance(answer, dict) and answer.get('state') == 'active'
+        return memberships[(org, slug)]
+
     for pull in _pages(fetch, f'repos/{repository}/pulls?state=open'):
+        draft = bool(pull.get('draft'))
         labels = {str(label.get('name', '')).lower() for label in pull.get('labels') or [] if isinstance(label, dict)}
-        if RECORDS_LABEL not in labels or pull.get('draft'):
-            continue
-        reviewers = {str(r.get('login', '')).lower() for r in pull.get('requested_reviewers') or [] if isinstance(r, dict)}
-        why = 'requested reviewer' if login in reviewers else None
-        if why is None and rules and str((pull.get('user') or {}).get('login', '')).lower() != login:
+        files = None
+        if RECORDS_LABEL not in labels or draft:
+            # The live repository had no `records` label and the batch PR carried none, so a PR
+            # that changes record files counts as a records PR too. ai-dlc `propose` opens drafts:
+            # a draft counts when it changes record files, label or not.
             files = _pages(fetch, f'repos/{repository}/pulls/{int(pull["number"])}/files')
+            if not any(_is_record_path(str(f.get('filename', '')), record_roots) for f in files):
+                continue
+        author = str((pull.get('user') or {}).get('login', '')).lower()
+        reviewers = {str(r.get('login', '')).lower() for r in pull.get('requested_reviewers') or [] if isinstance(r, dict)}
+        if review == 'all':
+            why = 'owner of this repository'
+        elif login in reviewers:
+            why = 'requested reviewer'
+        elif author == login:
+            why = 'author'
+        elif any(in_team(t) for t in pull.get('requested_teams') or [] if isinstance(t, dict)):
+            why = 'member of a requested team'
+        elif author in batch:
+            why = 'reviewer of the batch'
+        else:
+            why = None
+        if why is None and rules:
+            if files is None:
+                files = _pages(fetch, f'repos/{repository}/pulls/{int(pull["number"])}/files')
             if any(login in owners_of(rules, str(f.get('filename', ''))) for f in files):
                 why = 'code owner'
         if why is None:
@@ -181,12 +236,13 @@ def pull_request_items(fetch: Fetch, repository: str, me: str, rules) -> list[di
         number = int(pull['number'])
         title = str(pull.get('title') or f'Pull request #{number}')
         items.append({
-            'key': f'pr:{repository.lower()}#{number}', 'review_kind': 'pull_request',
-            'title': f'Review records PR #{number}: {title}', 'url': pull.get('html_url'),
+            'key': f'pr:{repository.lower()}#{number}', 'review_kind': 'pull_request', 'draft': draft,
+            'title': f'Review {"draft " if draft else ""}records PR #{number}: {title}', 'url': pull.get('html_url'),
             'opened_at': opened.isoformat(), 'due_at': (opened + REVIEW_WINDOW).isoformat(),
-            'body': f'Open records pull request #{number} in {repository}, waiting on you as {why}. '
+            'body': f'Open {"draft " if draft else ""}records pull request #{number} in {repository}, '
+                    f'waiting on you as {why}. The 48-hour clock runs from when it was opened, draft or not. '
                     'Review it on GitHub; Work Copilot never approves or merges.',
-            'revision': _revision(number, title, opened.isoformat(), why),
+            'revision': _revision(number, title, opened.isoformat(), why, draft),
         })
     return items
 
@@ -262,7 +318,8 @@ def expiring_source_items(root: Path, now: datetime) -> list[dict]:
 
 
 def collect_review_queue(store, repo, *, me: str, owner: str | None = None, github: str | None = None,
-                         fetch: Fetch | None = None, now: datetime | None = None) -> dict:
+                         review: str = 'all', batch_authors=(), fetch: Fetch | None = None,
+                         now: datetime | None = None) -> dict:
     """Collect the queue and sync it into ``store``; returns counts, never writes externally."""
     from .knowledge import knowledge_root
     if not isinstance(me, str) or not me.strip():
@@ -273,7 +330,8 @@ def collect_review_queue(store, repo, *, me: str, owner: str | None = None, gith
     if github:
         if github.count('/') != 1 or any(not part or part != quote(part, safe='-_.') for part in github.split('/')):
             raise ValueError('--github must be owner/repository')
-        items += pull_request_items(fetch or gh_reader(), github, me, codeowner_rules(root))
+        items += pull_request_items(fetch or gh_reader(), github, me, codeowner_rules(root), review=review,
+                                    batch_authors=batch_authors, record_roots=_record_roots(root))
     items += overdue_record_items(root, owner or me, moment)
     items += expiring_source_items(root, moment)
     result = store.sync_review_queue(items, connector=CONNECTOR, observed_at=moment.isoformat())

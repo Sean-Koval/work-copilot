@@ -74,14 +74,22 @@ class FakeGitHub:
             _pull(1, reviewers=[ME], hours=50),                       # requested reviewer, over 48h
             _pull(2, hours=5),                                        # code owner of a changed convention
             _pull(3, reviewers=['someone-else']),                     # neither
-            _pull(4, labels=('docs',), reviewers=[ME]),               # not a records PR
+            _pull(4, labels=('docs',), reviewers=[ME]),               # not a records PR: no record files
         ]
-        self.files = {2: ['team/conventions/branch-names.md'], 3: ['team/decisions/x.md']}
+        self.files = {2: ['team/conventions/branch-names.md'], 3: ['team/decisions/x.md'], 4: ['README.md'],
+                      8: ['projects/hangar/decisions/a.md', 'team/sources/kan-1.md']}
         self.calls = []
+        self.teams = {('example-org', 'knowledge-reviewers'): {'state': 'active'}}
 
     def __call__(self, path):
         self.calls.append(path)
         route = path.split('?')[0]
+        if route.startswith('orgs/'):
+            _, org, _, slug, _, user = route.split('/')
+            assert user == ME
+            if (org, slug) not in self.teams:
+                raise LookupError(route)  # what gh_reader raises on HTTP 404
+            return self.teams[(org, slug)]
         if route == f'repos/{REPO}/pulls':
             return list(self.pulls)
         number = int(route.split('/')[4])
@@ -102,8 +110,9 @@ def store(tmp_path):
     value.close()
 
 
-def _collect(store, knowledge, github):
-    return collect_review_queue(store, knowledge, me=ME, github=REPO, fetch=github, now=store.clock['now'])
+def _collect(store, knowledge, github, review='assigned', batch_authors=()):
+    return collect_review_queue(store, knowledge, me=ME, github=REPO, fetch=github, now=store.clock['now'],
+                                review=review, batch_authors=batch_authors)
 
 
 def _queue(store):
@@ -172,7 +181,7 @@ def test_collect_never_writes_to_any_external_system(store, knowledge, monkeypat
     assert _tree(knowledge) == before
     # Only list reads: open pulls and a pull's files.
     assert github.calls and all(c.startswith(f'repos/{REPO}/pulls') and 'state=' in c or c.split('?')[0].endswith('/files')
-                                for c in github.calls)
+                                or c.startswith('orgs/') and '/memberships/' in c for c in github.calls)
 
 
 def test_gh_reader_only_issues_get_requests():
@@ -227,3 +236,105 @@ def test_module_has_no_write_verbs():
     text = Path(review_queue.__file__).read_text(encoding='utf-8')
     for verb in ("'POST'", "'PATCH'", "'PUT'", "'DELETE'", 'write_text', 'write_bytes', 'unlink('):
         assert verb not in text
+
+
+def test_personal_repo_review_all_lists_every_open_records_pr(store, knowledge):
+    github = FakeGitHub()
+    github.pulls.append(_pull(5, author=ME))                      # the batch, under the owner's own account
+    github.pulls.append({**_pull(6), 'draft': True})               # a labelled draft that changes no records
+    result = _collect(store, knowledge, github, review='all')
+    prs = sorted(k for k in _queue(store) if k.startswith('review:pr:'))
+    assert prs == [f'review:pr:{REPO}#{n}' for n in (1, 2, 3, 5)]
+    assert result['open'] == 6
+    # Labelled non-drafts need no file read when every records PR counts.
+    assert [c.split('?')[0] for c in github.calls if '/files' in c] == [f'repos/{REPO}/pulls/{n}/files' for n in (4, 6)]
+
+
+def test_draft_prs_that_change_records_are_listed_with_the_clock_from_created_at(store, knowledge):
+    # ai-dlc `propose` always opens records PRs as drafts.
+    github = FakeGitHub()
+    github.pulls = [{**_pull(10, labels=(), author=ME, hours=60), 'draft': True}]
+    github.files[10] = ['team/decisions/new-decision.md']
+    _collect(store, knowledge, github, review='all')
+    pr = _queue(store)[f'review:pr:{REPO}#10']
+    assert pr['draft'] is True and pr['title'].startswith('Review draft records PR #10')
+    assert pr['age_hours'] == 60.0
+    assert pr['due_at'] == (NOW - timedelta(hours=12)).isoformat()
+    assert _brief_obligation(pr)['draft'] is True
+    # Marked ready later: same obligation, no longer a draft, same clock.
+    github.pulls = [_pull(10, labels=(), author=ME, hours=60)]  # same created_at
+    store.clock['now'] = NOW + timedelta(hours=1)
+    _collect(store, knowledge, github, review='all')
+    ready = _queue(store)[f'review:pr:{REPO}#10']
+    assert ready['id'] == pr['id'] and ready['draft'] is False and ready['due_at'] == pr['due_at']
+
+
+def test_assigned_mode_counts_requested_teams_i_belong_to(store, knowledge):
+    github = FakeGitHub()
+    team = lambda slug: {'slug': slug, 'organization': {'login': 'example-org'}}  # noqa: E731
+    github.pulls = [{**_pull(11, author='teammate'), 'requested_teams': [team('knowledge-reviewers')]},
+                    {**_pull(12, author='teammate'), 'requested_teams': [team('other-team')]},
+                    {**_pull(13, author='teammate'), 'requested_teams': [team('knowledge-reviewers')]}]
+    _collect(store, knowledge, github, review='assigned')
+    assert sorted(k for k in _queue(store) if k.startswith('review:pr:')) == [f'review:pr:{REPO}#{n}' for n in (11, 13)]
+    membership = [c for c in github.calls if c.startswith('orgs/')]
+    assert membership == ['orgs/example-org/teams/knowledge-reviewers/memberships/reviewer-me',
+                          'orgs/example-org/teams/other-team/memberships/reviewer-me']  # cached per team
+
+
+def test_team_repo_adds_my_own_and_batch_bot_prs_to_assigned_ones(store, knowledge):
+    github = FakeGitHub()
+    github.pulls += [_pull(5, author='Reviewer-Me'), _pull(6, author='records-bot'), _pull(7, author='teammate')]
+    _collect(store, knowledge, github, review='assigned', batch_authors=('@records-bot',))
+    prs = sorted(k for k in _queue(store) if k.startswith('review:pr:'))
+    assert prs == [f'review:pr:{REPO}#{n}' for n in (1, 2, 5, 6)]
+    with pytest.raises(ValueError):
+        _collect(store, knowledge, github, review='everything')
+
+
+def test_serving_app_refreshes_the_queue_on_the_collector_cadence(tmp_path, knowledge, monkeypatch):
+    import asyncio
+
+    from fastapi.testclient import TestClient
+
+    from work_copilot.app import create_app
+    calls = []
+    real = review_queue.collect_review_queue
+
+    def counting(store, **settings):
+        calls.append(settings)
+        return real(store, **settings, fetch=FakeGitHub(), now=NOW)
+
+    monkeypatch.setattr(review_queue, 'collect_review_queue', counting)
+    settings = {'repo': knowledge, 'me': ME, 'owner': None, 'github': REPO, 'review': 'all', 'batch_authors': ()}
+    app = create_app(tmp_path / 'data', review_queue=settings)
+    with TestClient(app, base_url='http://127.0.0.1:8765') as client:
+        # The worker records the call before the collect commits; wait for the result itself.
+        for _ in range(200):
+            state = client.get('/api/state').json()
+            if len(state['review_queue']) == 5:
+                break
+            asyncio.run(asyncio.sleep(0.05))
+    assert calls and calls[0]['review'] == 'all'
+    assert state['runtime']['review_queue_configured'] is True
+    assert len(state['review_queue']) == 5  # PRs 1-3, the overdue record, the old Source
+
+
+def test_unlabelled_pr_that_changes_records_counts_as_a_records_pr(store, knowledge):
+    # Live run on 2026-11-12: the repository had no `records` label and the back-fill PR carried none.
+    github = FakeGitHub()
+    github.pulls = [_pull(8, labels=(), author=ME, hours=3), _pull(9, labels=(), author=ME)]
+    github.files[9] = ['README.md', '.github/workflows/check.yml']
+    _collect(store, knowledge, github, review='all')
+    assert sorted(k for k in _queue(store) if k.startswith('review:pr:')) == [f'review:pr:{REPO}#8']
+
+
+def test_gh_reader_maps_404_to_lookup_error():
+    class Result:
+        returncode = 1
+        stdout = ''
+        stderr = 'gh: Not Found (HTTP 404)'
+
+    fetch = gh_reader(runner=lambda argv, **kwargs: Result(), executable='gh')
+    with pytest.raises(LookupError):
+        fetch('orgs/example-org/teams/x/memberships/reviewer-me')

@@ -12,6 +12,18 @@ def default_data_dir(demo=False):
     return base / ('work-copilot-demo' if demo else 'work-copilot')
 
 
+def _review_options(p):
+    p.add_argument('--github',default=os.environ.get('WORK_COPILOT_KNOWLEDGE_GITHUB'),help='owner/repo whose open records PRs to read with gh (GET only). Default: WORK_COPILOT_KNOWLEDGE_GITHUB')
+    p.add_argument('--me',default=os.environ.get('WORK_COPILOT_GITHUB_LOGIN'),help='Your GitHub login. Default: WORK_COPILOT_GITHUB_LOGIN')
+    p.add_argument('--owner',default=os.environ.get('WORK_COPILOT_KNOWLEDGE_OWNER'),help='Your record owner value, if it differs from --me. Default: WORK_COPILOT_KNOWLEDGE_OWNER')
+    p.add_argument('--review',choices=['all','assigned'],default=os.environ.get('WORK_COPILOT_KNOWLEDGE_REVIEW','all'),help='all: every open records PR (personal repo, default). assigned: PRs that request you, you code-own, you or the batch bot opened (team repo)')
+    p.add_argument('--batch-author',action='append',default=[a for a in os.environ.get('WORK_COPILOT_KNOWLEDGE_BATCH_AUTHORS','').split(',') if a.strip()],help='GitHub login of the bot that opens records PRs; repeat for several. Default: WORK_COPILOT_KNOWLEDGE_BATCH_AUTHORS')
+
+
+def _review_settings(args, repo):
+    return {'repo':repo,'me':args.me or '','owner':args.owner,'github':args.github,'review':args.review,'batch_authors':tuple(a.strip() for a in args.batch_author)}
+
+
 def _run():
     parser=argparse.ArgumentParser(description='Local-first Work Copilot. No external sending.')
     parser.add_argument('--timezone',default=os.environ.get('WORK_COPILOT_TIMEZONE','UTC'),help='IANA timezone for Today/follow-ups; default UTC')
@@ -32,6 +44,8 @@ def _run():
             p.add_argument('--connector-config',type=Path,help='Explicit configured OAuth MCP collector; never opens OAuth automatically')
             p.add_argument('--port',type=int,default=8765)
             p.add_argument('--vault',type=Path,help='Explicitly selected approved Markdown folder')
+            p.add_argument('--review-repo',type=Path,help='Refresh the knowledge review queue from this local clone on the collector cadence')
+            _review_options(p)
         elif name=='capture':
             p.add_argument('vault',type=Path)
         elif name=='export':
@@ -42,9 +56,7 @@ def _run():
             p.add_argument('--scope',default='personal',choices=['personal','project','team'])
         elif name=='review-queue':
             p.add_argument('--repo',type=Path,default=os.environ.get('WORK_COPILOT_KNOWLEDGE_REPO'),help='Local clone of the knowledge repository (read only). Default: WORK_COPILOT_KNOWLEDGE_REPO')
-            p.add_argument('--github',default=os.environ.get('WORK_COPILOT_KNOWLEDGE_GITHUB'),help='owner/repo whose open records PRs to read with gh (GET only). Default: WORK_COPILOT_KNOWLEDGE_GITHUB')
-            p.add_argument('--me',default=os.environ.get('WORK_COPILOT_GITHUB_LOGIN'),help='Your GitHub login. Default: WORK_COPILOT_GITHUB_LOGIN')
-            p.add_argument('--owner',default=os.environ.get('WORK_COPILOT_KNOWLEDGE_OWNER'),help='Your record owner value, if it differs from --me. Default: WORK_COPILOT_KNOWLEDGE_OWNER')
+            _review_options(p)
         elif name=='import':
             p.add_argument('file',type=Path,help='Normalized JSON envelope or source array')
         elif name in {'connect','collect'}:
@@ -95,7 +107,14 @@ def _run():
         from .app import create_app
         import uvicorn
         print(f'Work Copilot: http://127.0.0.1:{args.port} | private data: {data}',flush=True)
-        uvicorn.run(create_app(data,demo=args.command=='demo',vault=args.vault,connector_config=args.connector_config),host='127.0.0.1',port=args.port)
+        review_settings=None
+        if args.review_repo:
+            from .knowledge import knowledge_root
+            knowledge_root(args.review_repo)
+            if not args.me:
+                parser.error('--review-repo needs --me or WORK_COPILOT_GITHUB_LOGIN')
+            review_settings=_review_settings(args,args.review_repo)
+        uvicorn.run(create_app(data,demo=args.command=='demo',vault=args.vault,connector_config=args.connector_config,review_queue=review_settings),host='127.0.0.1',port=args.port)
         return
     from .store import Store
     store=Store(data/'copilot.db')
@@ -133,7 +152,7 @@ def _run():
             if args.repo is None:
                 raise ValueError('Give the local knowledge repository with --repo or WORK_COPILOT_KNOWLEDGE_REPO')
             from .review_queue import collect_review_queue
-            result=collect_review_queue(store,args.repo,me=args.me or '',owner=args.owner,github=args.github)
+            result=collect_review_queue(store,**_review_settings(args,args.repo))
         elif args.command=='import':
             payload=json.loads(args.file.read_text(encoding='utf-8'))
             items=payload if isinstance(payload,list) else payload['items']

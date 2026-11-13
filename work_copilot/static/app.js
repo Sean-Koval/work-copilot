@@ -98,6 +98,7 @@ function obligationCard(item, reviewMode = false) {
   const meta = append($('div','card-meta'), $('span','project-label',projectName(item.project_id)), tag(readable(item.status), item.status === 'candidate' ? 'warning' : 'neutral'));
   if (item.commitment) meta.append(tag('Commitment'));
   if (item.kind === 'review') meta.append(reviewAge(item));
+  if (item.kind === 'review' && item.draft) meta.append(tag('Draft PR', 'warning'));
   append(card, meta, $('h3','',item.title));
   if (item.kind === 'review' && item.path) card.append($('p','subtle-note',`Knowledge repository: ${item.path}`));
   if (item.review_reason) card.append($('p','draft-warning',readable(item.review_reason)));
