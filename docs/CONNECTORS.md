@@ -91,12 +91,15 @@ From the selected vault, only lines starting with `>>` are exported. They form o
 
 ### Customer repositories
 
-The destination's `knowledge.toml` decides which Sources it receives, so customer chat never reaches the team repository (KAN-489, ai-dlc ADR 0007). A source's customer is the Work Copilot project its room is bound to.
+The destination's `knowledge.toml` decides which Sources it receives, so customer chat never reaches the team repository (KAN-489, ai-dlc ADR 0007). A folder without a regular `knowledge.toml` file receives nothing.
+
+A Source's projects are its own and those its room is bound to in Work Copilot. A customer's room stays the customer's whatever the payload says. Ids are compared trimmed and casefolded, so `Alpha` and `alpha` are one project.
 
 - A customer repository declares `[repo] boundary = "customer"` and `project`. It receives only Sources bound to that project alone, written with `scope: project`, `boundary: customer` and `project`.
 - A team repository that lists `[[transcripts.customers]]` receives no Source bound to a customer project. Once any customer is listed, it also skips a Source bound to no project, since an unbound room may be a customer's. Bind the room to a project to export it.
-- Marked note lines are your own words, so they go to the team unless their note is bound to a customer project.
-- A malformed `[repo]` or customer list exports nothing.
+- Marked note lines are your own words. They go to the team unless their note is bound to a customer project or names one.
+- A malformed `[repo]` or customer list, or the retired `[[transcripts.projects]]`, exports nothing.
+- Export checks only what it writes. Records already in the team `inbox/` are not checked again.
 
 Run export once per repository: once with `--to` the team checkout, and once per customer checkout. The result lists each skipped Source under `skipped`, by record id and reason, never by title.
 

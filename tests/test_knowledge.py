@@ -63,6 +63,7 @@ def record_errors(path):
 def repo(tmp_path):
     root = tmp_path / 'knowledge'
     root.mkdir()
+    (root / 'knowledge.toml').write_text('[format]\nversion = 1\n', encoding='utf-8')
     return root.resolve()
 
 
@@ -378,6 +379,7 @@ def test_customer_marked_notes_stay_with_the_customer(tmp_path, repo):
     ('[[transcripts.customers]]\ntitles = ["Alpha"]\n', 'project'),
     ('[transcripts]\ncustomers = "alpha"\n', 'list'),
     ('[repo\n', 'TOML'),
+    ('[[transcripts.projects]]\nproject = "alpha"\n', 'retired'),
 ])
 def test_a_malformed_declaration_exports_nothing(customer_store, repo, toml, message):
     (repo / 'knowledge.toml').write_text(toml, encoding='utf-8')
@@ -390,3 +392,66 @@ def test_without_customer_rules_the_team_export_is_unchanged(customer_store, rep
     result = export_sources(customer_store, repo, owner='sean', now=NOW)
     assert result['skipped'] == [] and result['customer'] is None
     assert 'UNBOUND-BODY' in _text(repo)
+
+
+@pytest.mark.parametrize('spelling', ['Alpha', ' alpha ', 'ALPHA', '\uff41lpha'])
+def test_a_differently_written_customer_id_is_still_the_customer(tmp_path, repo, spelling):
+    store = Store(tmp_path / 'k.db', now=lambda: NOW, timezone_name='UTC')
+    store.ingest([dict(CUSTOMER_SOURCES[0], projects=[{'id': spelling, 'name': 'Alpha'}])])
+    (repo / 'knowledge.toml').write_text(TEAM_TOML, encoding='utf-8')
+    result = export_sources(store, repo, owner='sean', now=NOW)
+    assert 'ALPHA' not in _text(repo) and len(result['skipped']) == 1
+    alpha = _customer_repo(tmp_path)
+    assert len(export_sources(store, alpha, owner='sean', now=NOW)['written']) == 1
+    store.close()
+
+
+def test_a_customer_room_stays_the_customers_whatever_the_payload_says(tmp_path, repo):
+    store = Store(tmp_path / 'r.db', now=lambda: NOW, timezone_name='UTC')
+    store.create_project('alpha', 'Alpha', rooms=[{'id': 'room-alpha', 'name': 'Alpha room'}])
+    store.ingest([dict(CUSTOMER_SOURCES[0], room_id='room-alpha', projects=[{'id': 'atlas', 'name': 'Atlas'}])])
+    (repo / 'knowledge.toml').write_text(TEAM_TOML, encoding='utf-8')
+    result = export_sources(store, repo, owner='sean', now=NOW)
+    assert 'ALPHA' not in _text(repo)
+    assert result['written'] == [] and 'customer project' in result['skipped'][0]['reason']
+    store.close()
+
+
+def test_a_folder_without_a_regular_knowledge_toml_gets_nothing(customer_store, tmp_path):
+    missing = tmp_path / 'plain'
+    missing.mkdir()
+    with pytest.raises(ValueError, match='knowledge.toml'):
+        export_sources(customer_store, missing, owner='sean', now=NOW)
+    (missing / 'knowledge.toml').mkdir()
+    with pytest.raises(ValueError, match='knowledge.toml'):
+        export_sources(customer_store, missing, owner='sean', now=NOW)
+    assert not (missing / 'inbox').exists()
+
+
+def _note_store(tmp_path, body, **extra):
+    vault = tmp_path / 'vault'
+    (vault / 'Daily').mkdir(parents=True)
+    (vault / 'Daily' / '2026-11-12.md').write_text('>> Team note: pin the harness\n', encoding='utf-8')
+    store = Store(tmp_path / 'n.db', timezone_name='UTC')
+    capture_vault(store, vault.resolve())
+    [note] = [s for s in store.list_sources() if s['provider'] == 'vault']
+    store.ingest([dict(note, id=note['id'] + ':x', revision='r2', title='Daily/2026-11-12 x.md', body=body, **extra)])
+    return store
+
+
+def test_a_left_out_note_is_reported_by_record_id(tmp_path, repo):
+    store = _note_store(tmp_path, 'L1: >> ALPHA-NOTE: the cutover', projects=[{'id': 'alpha', 'name': 'Alpha'}])
+    (repo / 'knowledge.toml').write_text(TEAM_TOML, encoding='utf-8')
+    result = export_sources(store, repo, owner='sean', now=NOW)
+    assert len(result['skipped']) == 1 and 'ALPHA' not in json.dumps(result)
+    store.close()
+
+
+def test_an_unbound_note_that_names_a_customer_stays_out_of_the_team(tmp_path, repo):
+    store = _note_store(tmp_path, 'L1: >> ALPHA-NOTE: the cutover', suggested_projects=['alpha'])
+    (repo / 'knowledge.toml').write_text(TEAM_TOML, encoding='utf-8')
+    result = export_sources(store, repo, owner='sean', now=NOW)
+    text = _text(repo)
+    assert 'Team note' in text and 'ALPHA-NOTE' not in text
+    assert 'names a customer project' in result['skipped'][0]['reason']
+    store.close()

@@ -21,13 +21,16 @@ promotion belong to the knowledge repository's own workflow.
 Customer boundary (KAN-489, ai-dlc ADR 0007). The destination's ``knowledge.toml``
 decides what it may receive, and anything unclear is left out:
 
+* The destination must have a ``knowledge.toml``; a folder without one gets nothing.
+* A source's projects are its own and those its room is bound to, compared after
+  trimming and casefolding, so ``Alpha`` and ``alpha`` are one project.
 * A customer repository declares ``[repo] boundary = "customer"`` and ``project``. It
-  receives only Sources whose Work Copilot projects are exactly that project, written
-  with ``scope: project``, ``boundary: customer`` and ``project``.
+  receives only Sources whose projects are exactly that project, written with
+  ``scope: project``, ``boundary: customer`` and ``project``.
 * A team repository that lists ``[[transcripts.customers]]`` never receives a Source
   bound to a customer project, nor, once any customer is listed, one bound to no
   project: an unbound room may be a customer's. Marked note lines are the user's own
-  words and go unless their note is bound to a customer project.
+  words and go unless their note is bound to, or names, a customer project.
 
 A Source left out is reported by its record id and a reason, never by its title.
 """
@@ -39,6 +42,7 @@ import os
 import re
 import tempfile
 import tomllib
+import unicodedata
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
@@ -67,7 +71,7 @@ _SUMMARY_LINES = 3
 _SUMMARY_CHARS = 400
 _DAY = re.compile(r'^(\d{4}-\d{2}-\d{2})')
 _LINE_LABEL = re.compile(r'^L\d+: ')
-_PROJECT = re.compile(r'^[a-z0-9]+(?:-[a-z0-9]+)*$')
+_PROJECT = re.compile(r'^[a-z0-9][a-z0-9-]*$')  # ai-dlc's SLUG
 
 
 def _instant(value) -> datetime:
@@ -220,6 +224,28 @@ def project_ids(source: dict) -> list[str]:
     return projects
 
 
+def _key(project: str) -> str:
+    """A project id as the boundary compares it: NFKC, trimmed, casefolded."""
+    return unicodedata.normalize('NFKC', project).strip().casefold()
+
+
+def room_projects(store) -> dict[str, list[str]]:
+    """Project ids each configured room is bound to.
+
+    The store reads a room binding only when a source carries no projects of its own,
+    so export looks the binding up itself: a customer's room stays a customer's room
+    whatever the payload or a manual mapping says.
+    """
+    rooms: dict[str, list[str]] = {}
+    with store._lock:
+        rows = store.db.execute('SELECT project_id, rooms FROM project_config').fetchall()
+    for project, value in rows:
+        for room in json.loads(value or '[]'):
+            if isinstance(room, dict) and isinstance(room.get('id'), str):
+                rooms.setdefault(room['id'], []).append(project)
+    return rooms
+
+
 def build_record(source: dict, *, owner: str, scope: str, day: str, raw_resource: str,
                  raw_hash: str, exported_at: datetime, extra_sources=(), customer: str | None = None) -> str:
     """Render one Source record (frontmatter and summary body) for a source."""
@@ -347,10 +373,14 @@ def destination_rules(root: Path) -> dict:
     path = root / 'knowledge.toml'
     if path.is_symlink():
         raise ValueError('knowledge.toml cannot be a symlink')
+    if not path.is_file():
+        raise ValueError('--to must be the root of a knowledge repository, with a knowledge.toml file')
     try:
-        parsed = tomllib.loads(path.read_text(encoding='utf-8')) if path.is_file() else {}
+        parsed = tomllib.loads(path.read_text(encoding='utf-8'))
     except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
         raise ValueError(f'knowledge.toml is not valid TOML: {exc}') from None
+    except OSError as exc:
+        raise ValueError(f'knowledge.toml cannot be read: {exc.strerror or exc}') from None
     if 'repo' in parsed:
         repo = parsed['repo']
         project = repo.get('project') if isinstance(repo, dict) else None
@@ -359,6 +389,8 @@ def destination_rules(root: Path) -> dict:
             raise ValueError('knowledge.toml [repo] must declare boundary = "customer" and a project slug')
         return {'customer': project}
     transcripts = parsed.get('transcripts', {})
+    if isinstance(transcripts, dict) and 'projects' in transcripts:
+        raise ValueError('knowledge.toml [[transcripts.projects]] is retired; list customers in [[transcripts.customers]]')
     rules = transcripts.get('customers', []) if isinstance(transcripts, dict) else None
     if not isinstance(rules, list):
         raise ValueError('knowledge.toml [[transcripts.customers]] must be a list of tables')
@@ -367,22 +399,27 @@ def destination_rules(root: Path) -> dict:
         project = rule.get('project') if isinstance(rule, dict) else None
         if not isinstance(project, str) or not project.strip():
             raise ValueError('every [[transcripts.customers]] rule needs a project')
-        customers.add(project.strip())
+        customers.add(_key(project))
     return {'customer': None, 'customers': customers}
 
 
-def left_out(projects: list[str], rules: dict, *, note: bool = False) -> str | None:
-    """Why a source bound to ``projects`` may not go to this destination, or ``None``."""
+def left_out(projects: list[str], rules: dict, *, note: bool = False, named=()) -> str | None:
+    """Why a source bound to ``projects`` may not go to this destination, or ``None``.
+
+    ``named`` are projects a note mentions without being bound to them."""
+    keys = {_key(project) for project in projects}
     customer = rules['customer']
     if customer:
-        if set(projects) == {customer}:
+        if keys == {customer}:
             return None
         return 'not bound to this customer project alone'
     customers = rules['customers']
-    if customers & set(projects):
+    if customers & keys:
         return "bound to a customer project; export it to that customer's repository"
-    if customers and not projects and not note:
+    if customers and not keys and not note:
         return 'bound to no project; bind its room to a project in Work Copilot'
+    if customers & {_key(project) for project in named}:
+        return 'names a customer project; bind the note to a project in Work Copilot'
     return None
 
 
@@ -409,16 +446,23 @@ def export_sources(store, destination, *, owner: str, since: str | None = None,
         return cutoff is None or _instant(source['observed_at']) >= cutoff
 
     current = [s for s in store.list_sources() if not s.get('deleted') and recent(s)]
-    pending, skipped = [], []
+    rooms = room_projects(store)
+    pending, skipped, notes = [], [], []
     for source in current:
-        if source['provider'] in _NOT_CAPTURED or source['provider'] == 'vault':
+        if source['provider'] in _NOT_CAPTURED:
             continue
-        reason = left_out(project_ids(source), rules)
+        projects = project_ids(source) + rooms.get(source.get('room_id') or '', [])
+        note = source['provider'] == 'vault'
+        named = (source.get('suggested_projects') or []) if note else []
+        reason = left_out(projects, rules, note=note, named=named)
         if reason:
-            skipped.append({'record': record_id(source['id'], source['provider']), 'reason': reason})
+            if not note or marked_lines(source.get('body', '')):
+                skipped.append({'record': record_id(source['id'], source['provider']), 'reason': reason})
             continue
-        pending.append((source, store._calendar_date(source['observed_at']), []))
-    notes = [s for s in current if s['provider'] == 'vault' and not left_out(project_ids(s), rules, note=True)]
+        if note:
+            notes.append(source)
+        else:
+            pending.append((source, store._calendar_date(source['observed_at']), []))
     for envelope, origins in marked_note_envelopes(store, notes):
         pending.append((envelope, envelope['day'], origins))
 
