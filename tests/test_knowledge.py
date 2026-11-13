@@ -417,6 +417,16 @@ def test_a_customer_room_stays_the_customers_whatever_the_payload_says(tmp_path,
     store.close()
 
 
+@pytest.mark.parametrize('spelling', ['Acme Corp', 'acme_corp', ' ACME-corp ', 'acme--corp'])
+def test_spaces_and_underscores_in_an_id_still_match_the_customer_slug(tmp_path, repo, spelling):
+    store = Store(tmp_path / 'u.db', now=lambda: NOW, timezone_name='UTC')
+    store.ingest([dict(CUSTOMER_SOURCES[0], projects=[{'id': spelling, 'name': 'Acme'}])])
+    (repo / 'knowledge.toml').write_text('[[transcripts.customers]]\nproject = "acme-corp"\n', encoding='utf-8')
+    result = export_sources(store, repo, owner='sean', now=NOW)
+    assert 'ALPHA' not in _text(repo) and result['written'] == [] and len(result['skipped']) == 1
+    store.close()
+
+
 def test_a_room_bound_to_a_differently_written_customer_is_the_customers(tmp_path, repo):
     store = Store(tmp_path / 'a.db', now=lambda: NOW, timezone_name='UTC')
     store.create_project('Acme Corp', 'Acme', rooms=[{'id': 'room-acme', 'name': 'Acme room'}])
