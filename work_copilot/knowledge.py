@@ -17,6 +17,27 @@ did not just create. Per source it writes two new files:
 
 Inbox items are candidates for 30 days (``stale_after``). Retention, numbering and
 promotion belong to the knowledge repository's own workflow.
+
+Customer boundary (KAN-489, ai-dlc ADR 0007). The destination's ``knowledge.toml``
+decides what it may receive, and anything unclear is left out:
+
+* The destination must have a ``knowledge.toml``; a folder without one gets nothing.
+* A source's projects are its own and those its room is bound to, compared in the
+  shape of ai-dlc's slug, so ``Acme Corp`` and ``acme-corp`` are one project.
+* A customer repository declares ``[repo] boundary = "customer"`` and ``project``. It
+  receives only Sources whose projects are exactly that project, written with
+  ``scope: project``, ``boundary: customer`` and ``project``.
+* A team repository must declare its customers: ``[[transcripts.customers]]``, or
+  ``customers = []`` under ``[transcripts]`` when it has none. Without that declaration
+  it receives only marked note lines that are bound to, and name, no project; every
+  other Source is left out, since Work Copilot cannot tell a customer project from an
+  internal one (fail closed).
+* A declaring team repository never receives a Source bound to a customer project, nor,
+  once any customer is listed, one bound to no project: an unbound room may be a
+  customer's. Marked note lines are the user's own words and go unless their note is
+  bound to, or names, a customer project.
+
+A Source left out is reported by its record id and a reason, never by its title.
 """
 from __future__ import annotations
 
@@ -25,6 +46,8 @@ import json
 import os
 import re
 import tempfile
+import tomllib
+import unicodedata
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
@@ -53,6 +76,7 @@ _SUMMARY_LINES = 3
 _SUMMARY_CHARS = 400
 _DAY = re.compile(r'^(\d{4}-\d{2}-\d{2})')
 _LINE_LABEL = re.compile(r'^L\d+: ')
+_PROJECT = re.compile(r'^[a-z0-9][a-z0-9-]*$')  # ai-dlc's SLUG
 
 
 def _instant(value) -> datetime:
@@ -195,21 +219,53 @@ def parse_frontmatter(text: str) -> dict | None:
     return None
 
 
-def build_record(source: dict, *, owner: str, scope: str, day: str, raw_resource: str,
-                 raw_hash: str, exported_at: datetime, extra_sources=()) -> str:
-    """Render one Source record (frontmatter and summary body) for a source."""
-    envelope = contract_envelope(source)
+def project_ids(source: dict) -> list[str]:
+    """The Work Copilot project ids a source is bound to, in order, without repeats."""
     projects = []
     for project in source.get('projects') or []:
         target = project.get('id') if isinstance(project, dict) else None
         if isinstance(target, str) and target and target not in projects:
             projects.append(target)
+    return projects
+
+
+def _key(project: str) -> str:
+    """A project id in the shape of ai-dlc's slug: casefolded, accents dropped, every
+    run of other characters one ``-``. An id of punctuation alone is no project. ``Acme Corp`` and ``acme-corp`` are one project, so a
+    near match counts as the customer and fails closed."""
+    decomposed = unicodedata.normalize('NFKD', unicodedata.normalize('NFKC', project).casefold())
+    plain = ''.join(c for c in decomposed if not unicodedata.combining(c))
+    return re.sub(r'[^a-z0-9]+', '-', plain).strip('-')
+
+
+def room_projects(store) -> dict[str, list[str]]:
+    """Project ids each configured room is bound to.
+
+    The store reads a room binding only when a source carries no projects of its own,
+    so export looks the binding up itself: a customer's room stays a customer's room
+    whatever the payload or a manual mapping says.
+    """
+    rooms: dict[str, list[str]] = {}
+    with store._lock:
+        rows = store.db.execute('SELECT project_id, rooms FROM project_config').fetchall()
+    for project, value in rows:
+        for room in json.loads(value or '[]'):
+            if isinstance(room, dict) and isinstance(room.get('id'), str):
+                rooms.setdefault(room['id'], []).append(project)
+    return rooms
+
+
+def build_record(source: dict, *, owner: str, scope: str, day: str, raw_resource: str,
+                 raw_hash: str, exported_at: datetime, extra_sources=(), customer: str | None = None) -> str:
+    """Render one Source record (frontmatter and summary body) for a source."""
+    envelope = contract_envelope(source)
+    projects = project_ids(source)
     stale = (exported_at + CANDIDATE_WINDOW).astimezone(timezone.utc)
     excerpt = summary(envelope['body'])
     fields = {
         'id': record_id(envelope['id'], envelope['provider']),
         'type': 'source',
-        'scope': scope,
+        'scope': 'project' if customer else scope,
         'status': 'raw',
         'date': day,
         'owner': owner,
@@ -224,6 +280,9 @@ def build_record(source: dict, *, owner: str, scope: str, day: str, raw_resource
         'observed_at': envelope['observed_at'],
         'obligations': envelope['obligations'],
     }
+    if customer:
+        fields['boundary'] = 'customer'
+        fields['project'] = customer
     if excerpt:
         fields['description'] = excerpt.splitlines()[0][:200]
     if 'url' in envelope:
@@ -313,6 +372,76 @@ def knowledge_root(path) -> Path:
         raise ValueError(f'Knowledge repository path: {exc}') from None
 
 
+def destination_rules(root: Path) -> dict:
+    """What the knowledge repository at ``root`` may receive, from its ``knowledge.toml``.
+
+    ``{'customer': <project>}`` for a declared customer repository, otherwise
+    ``{'customer': None, 'customers': {<customer project>, ...}}``, with ``customers``
+    ``None`` when the team repository declares no customer list. A malformed file or
+    declaration raises, so nothing is exported on a guess.
+    """
+    path = root / 'knowledge.toml'
+    if path.is_symlink():
+        raise ValueError('knowledge.toml cannot be a symlink')
+    if not path.is_file():
+        raise ValueError('--to must be the root of a knowledge repository, with a knowledge.toml file')
+    try:
+        parsed = tomllib.loads(path.read_text(encoding='utf-8'))
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
+        raise ValueError(f'knowledge.toml is not valid TOML: {exc}') from None
+    except OSError as exc:
+        raise ValueError(f'knowledge.toml cannot be read: {exc.strerror or exc}') from None
+    if 'repo' in parsed:
+        repo = parsed['repo']
+        project = repo.get('project') if isinstance(repo, dict) else None
+        if not isinstance(repo, dict) or repo.get('boundary') != 'customer' or not (
+                isinstance(project, str) and _PROJECT.fullmatch(project)):
+            raise ValueError('knowledge.toml [repo] must declare boundary = "customer" and a project slug')
+        return {'customer': project}
+    transcripts = parsed.get('transcripts', {})
+    if isinstance(transcripts, dict) and 'projects' in transcripts:
+        raise ValueError('knowledge.toml [[transcripts.projects]] is retired; list customers in [[transcripts.customers]]')
+    if not isinstance(transcripts, dict):
+        raise ValueError('knowledge.toml [transcripts] must be a table')
+    if 'customers' not in transcripts:
+        return {'customer': None, 'customers': None}
+    rules = transcripts['customers']
+    if not isinstance(rules, list):
+        raise ValueError('knowledge.toml [[transcripts.customers]] must be a list of tables')
+    customers = set()
+    for rule in rules:
+        project = rule.get('project') if isinstance(rule, dict) else None
+        if not isinstance(project, str) or not project.strip():
+            raise ValueError('every [[transcripts.customers]] rule needs a project')
+        customers.add(_key(project))
+    return {'customer': None, 'customers': customers}
+
+
+def left_out(projects: list[str], rules: dict, *, note: bool = False, named=()) -> str | None:
+    """Why a source bound to ``projects`` may not go to this destination, or ``None``.
+
+    ``named`` are projects a note mentions without being bound to them."""
+    keys = {_key(project) for project in projects} - {''}
+    customer = rules['customer']
+    if customer:
+        if keys == {customer}:
+            return None
+        return 'not bound to this customer project alone'
+    customers = rules['customers']
+    if customers is None:
+        if keys or not note or {_key(project) for project in named} - {''}:
+            return ('the team repository declares no customers; list them in [[transcripts.customers]], '
+                    'or set customers = [] under [transcripts] if it has none')
+        return None
+    if customers & keys:
+        return "bound to a customer project; export it to that customer's repository"
+    if customers and not keys and not note:
+        return 'bound to no project; bind its room to a project in Work Copilot'
+    if customers & {_key(project) for project in named}:
+        return 'names a customer project; bind the note to a project in Work Copilot'
+    return None
+
+
 def export_sources(store, destination, *, owner: str, since: str | None = None,
                    scope: str = 'personal', now: datetime | None = None) -> dict:
     """Write Source records for captured sources into ``<destination>/inbox/``.
@@ -328,6 +457,7 @@ def export_sources(store, destination, *, owner: str, since: str | None = None,
     cutoff = _instant(since) if since else None
     moment = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     root = knowledge_root(destination)
+    rules = destination_rules(root)
     inbox = _directory(root / 'inbox')
     raw = _directory(inbox / 'raw')
 
@@ -335,12 +465,24 @@ def export_sources(store, destination, *, owner: str, since: str | None = None,
         return cutoff is None or _instant(source['observed_at']) >= cutoff
 
     current = [s for s in store.list_sources() if not s.get('deleted') and recent(s)]
-    pending = []
+    rooms = room_projects(store)
+    pending, skipped, notes = [], [], []
     for source in current:
-        if source['provider'] in _NOT_CAPTURED or source['provider'] == 'vault':
+        if source['provider'] in _NOT_CAPTURED:
             continue
-        pending.append((source, store._calendar_date(source['observed_at']), []))
-    for envelope, origins in marked_note_envelopes(store, [s for s in current if s['provider'] == 'vault']):
+        projects = project_ids(source) + rooms.get(source.get('room_id') or '', [])
+        note = source['provider'] == 'vault'
+        named = (source.get('suggested_projects') or []) if note else []
+        reason = left_out(projects, rules, note=note, named=named)
+        if reason:
+            if not note or marked_lines(source.get('body', '')):
+                skipped.append({'record': record_id(source['id'], source['provider']), 'reason': reason})
+            continue
+        if note:
+            notes.append(source)
+        else:
+            pending.append((source, store._calendar_date(source['observed_at']), []))
+    for envelope, origins in marked_note_envelopes(store, notes):
         pending.append((envelope, envelope['day'], origins))
 
     written, unchanged, raw_written = [], [], []
@@ -361,8 +503,8 @@ def export_sources(store, destination, *, owner: str, since: str | None = None,
             raise ValueError(f'inbox/raw/{raw_name} does not match its sha256; not overwriting it')
         record = build_record(source, owner=owner.strip(), scope=scope, day=day,
                               raw_resource=f'inbox/raw/{raw_name}', raw_hash=digest,
-                              exported_at=moment, extra_sources=origins)
+                              exported_at=moment, extra_sources=origins, customer=rules['customer'])
         _write(target, record.encode('utf-8'))
         written.append(name)
-    return {'inbox': str(inbox), 'written': written, 'unchanged': unchanged,
-            'raw_written': raw_written, 'external_writes': False}
+    return {'inbox': str(inbox), 'customer': rules['customer'], 'written': written, 'unchanged': unchanged,
+            'raw_written': raw_written, 'skipped': skipped, 'external_writes': False}

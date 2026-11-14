@@ -93,7 +93,8 @@
             "derived_from",
             "supersedes",
             "implements",
-            "codified_as"
+            "codified_as",
+            "retracts"
           ],
           "title": "Type",
           "type": "string"
@@ -239,6 +240,63 @@
           ],
           "default": null,
           "title": "Last Modified"
+        },
+        "quote": {
+          "anyOf": [
+            {
+              "maxLength": 500,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "verbatim evidence",
+          "title": "Quote"
+        },
+        "speaker": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "who said the quote",
+          "title": "Speaker"
+        },
+        "at": {
+          "anyOf": [
+            {
+              "pattern": "^(?:[0-9]{1,3}:[0-5][0-9]:[0-5][0-9]|[0-9]{4}-[0-9]{2}-[0-9]{2}T\\S+)$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "HH:MM:SS offset or time in the source",
+          "title": "At"
+        },
+        "permalink": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "link to the quote",
+          "title": "Permalink"
         }
       },
       "required": [
@@ -534,6 +592,18 @@
               "required": [
                 "url"
               ]
+            },
+            {
+              "properties": {
+                "participants": {
+                  "not": {
+                    "type": "null"
+                  }
+                }
+              },
+              "required": [
+                "participants"
+              ]
             }
           ]
         }
@@ -658,6 +728,30 @@
         },
         "required": [
           "phase"
+        ]
+      },
+      "then": {
+        "properties": {
+          "boundary": {
+            "const": "customer"
+          }
+        },
+        "required": [
+          "boundary"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "project": {
+            "not": {
+              "type": "null"
+            }
+          }
+        },
+        "required": [
+          "project"
         ]
       },
       "then": {
@@ -826,6 +920,20 @@
       ],
       "default": null,
       "title": "Boundary"
+    },
+    "project": {
+      "anyOf": [
+        {
+          "pattern": "^[a-z0-9][a-z0-9-]*$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "customer project (boundary: customer)",
+      "title": "Project"
     },
     "phase": {
       "anyOf": [
@@ -1061,6 +1169,22 @@
       ],
       "default": null,
       "title": "Url"
+    },
+    "participants": {
+      "anyOf": [
+        {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "who took part (sources)",
+      "title": "Participants"
     }
   },
   "required": [
