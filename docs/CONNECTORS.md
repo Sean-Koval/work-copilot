@@ -96,6 +96,7 @@ The destination's `knowledge.toml` decides which Sources it receives, so custome
 A Source's projects are its own and those its room is bound to in Work Copilot. A customer's room stays the customer's whatever the payload says. Name the Work Copilot project with the customer's ai-dlc slug. Ids are compared in that shape, casefolded, without accents and with other characters as `-`, so `Acme Corp` also matches `acme-corp`.
 
 - A customer repository declares `[repo] boundary = "customer"` and `project`. It receives only Sources bound to that project alone, written with `scope: project`, `boundary: customer` and `project`.
+- A team repository must declare its customers in `[[transcripts.customers]]`, or set `customers = []` under `[transcripts]` when it has none. Without that, it receives only `>>` lines from notes bound to, and naming, no project: Work Copilot can't tell a customer project from an internal one, so it leaves the rest out.
 - A team repository that lists `[[transcripts.customers]]` receives no Source bound to a customer project. Once any customer is listed, it also skips a Source bound to no project, since an unbound room may be a customer's. Bind the room to a project to export it.
 - Marked note lines are your own words. A `>>` line in a note bound to no project is team-visible, unless the note names a customer project. Bind a note about a customer to that project.
 - A malformed `[repo]` or customer list, or the retired `[[transcripts.projects]]`, exports nothing.

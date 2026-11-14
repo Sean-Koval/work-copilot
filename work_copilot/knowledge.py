@@ -27,10 +27,15 @@ decides what it may receive, and anything unclear is left out:
 * A customer repository declares ``[repo] boundary = "customer"`` and ``project``. It
   receives only Sources whose projects are exactly that project, written with
   ``scope: project``, ``boundary: customer`` and ``project``.
-* A team repository that lists ``[[transcripts.customers]]`` never receives a Source
-  bound to a customer project, nor, once any customer is listed, one bound to no
-  project: an unbound room may be a customer's. Marked note lines are the user's own
-  words and go unless their note is bound to, or names, a customer project.
+* A team repository must declare its customers: ``[[transcripts.customers]]``, or
+  ``customers = []`` under ``[transcripts]`` when it has none. Without that declaration
+  it receives only marked note lines that are bound to, and name, no project; every
+  other Source is left out, since Work Copilot cannot tell a customer project from an
+  internal one (fail closed).
+* A declaring team repository never receives a Source bound to a customer project, nor,
+  once any customer is listed, one bound to no project: an unbound room may be a
+  customer's. Marked note lines are the user's own words and go unless their note is
+  bound to, or names, a customer project.
 
 A Source left out is reported by its record id and a reason, never by its title.
 """
@@ -371,7 +376,8 @@ def destination_rules(root: Path) -> dict:
     """What the knowledge repository at ``root`` may receive, from its ``knowledge.toml``.
 
     ``{'customer': <project>}`` for a declared customer repository, otherwise
-    ``{'customer': None, 'customers': {<customer project>, ...}}``. A malformed file or
+    ``{'customer': None, 'customers': {<customer project>, ...}}``, with ``customers``
+    ``None`` when the team repository declares no customer list. A malformed file or
     declaration raises, so nothing is exported on a guess.
     """
     path = root / 'knowledge.toml'
@@ -395,7 +401,11 @@ def destination_rules(root: Path) -> dict:
     transcripts = parsed.get('transcripts', {})
     if isinstance(transcripts, dict) and 'projects' in transcripts:
         raise ValueError('knowledge.toml [[transcripts.projects]] is retired; list customers in [[transcripts.customers]]')
-    rules = transcripts.get('customers', []) if isinstance(transcripts, dict) else None
+    if not isinstance(transcripts, dict):
+        raise ValueError('knowledge.toml [transcripts] must be a table')
+    if 'customers' not in transcripts:
+        return {'customer': None, 'customers': None}
+    rules = transcripts['customers']
     if not isinstance(rules, list):
         raise ValueError('knowledge.toml [[transcripts.customers]] must be a list of tables')
     customers = set()
@@ -418,6 +428,11 @@ def left_out(projects: list[str], rules: dict, *, note: bool = False, named=()) 
             return None
         return 'not bound to this customer project alone'
     customers = rules['customers']
+    if customers is None:
+        if keys or not note or {_key(project) for project in named} - {''}:
+            return ('the team repository declares no customers; list them in [[transcripts.customers]], '
+                    'or set customers = [] under [transcripts] if it has none')
+        return None
     if customers & keys:
         return "bound to a customer project; export it to that customer's repository"
     if customers and not keys and not note:

@@ -59,11 +59,15 @@ def record_errors(path):
     return [error.message for error in validator().iter_errors(front)]
 
 
+# A team repository that declares it has no customers.
+TEAM_WITHOUT_CUSTOMERS = '[format]\nversion = 1\n\n[transcripts]\ncustomers = []\n'
+
+
 @pytest.fixture
 def repo(tmp_path):
     root = tmp_path / 'knowledge'
     root.mkdir()
-    (root / 'knowledge.toml').write_text('[format]\nversion = 1\n', encoding='utf-8')
+    (root / 'knowledge.toml').write_text(TEAM_WITHOUT_CUSTOMERS, encoding='utf-8')
     return root.resolve()
 
 
@@ -388,10 +392,39 @@ def test_a_malformed_declaration_exports_nothing(customer_store, repo, toml, mes
     assert not (repo / 'inbox').exists()
 
 
-def test_without_customer_rules_the_team_export_is_unchanged(customer_store, repo):
+def test_a_team_repository_declaring_no_customers_takes_everything(customer_store, repo):
     result = export_sources(customer_store, repo, owner='sean', now=NOW)
     assert result['skipped'] == [] and result['customer'] is None
     assert 'UNBOUND-BODY' in _text(repo)
+
+
+@pytest.mark.parametrize('toml', ['[format]\nversion = 1\n', '[transcripts]\nowner = "sean"\n'])
+def test_a_team_repository_without_a_customer_list_fails_closed(customer_store, repo, toml):
+    """Work Copilot cannot tell a customer project from an internal one, so it asks the repository."""
+    (repo / 'knowledge.toml').write_text(toml, encoding='utf-8')
+    result = export_sources(customer_store, repo, owner='sean', now=NOW)
+    text = _text(repo)
+    for marker in ('ALPHA', 'MIXED', 'UNBOUND', 'BETA', 'Ticket naming thread', 'Weekly planning call'):
+        assert marker not in text
+    assert 'Pin the harness' in text  # a marked note bound to and naming no project
+    assert result['skipped'] and all('declares no customers' in s['reason'] for s in result['skipped'])
+    for marker in ('ALPHA', 'MIXED', 'UNBOUND', 'BETA', 'thread:alpha'):
+        assert marker not in json.dumps(result)
+
+
+def test_without_a_customer_list_a_note_that_names_a_project_stays(tmp_path, repo):
+    vault = tmp_path / 'vault'
+    (vault / 'Daily').mkdir(parents=True)
+    (vault / 'Daily' / '2026-11-12.md').write_text('>> Alpha cutover moves to Friday\n', encoding='utf-8')
+    store = Store(tmp_path / 'n.db', timezone_name='UTC')
+    store.create_project('alpha', 'Alpha')
+    capture_vault(store, vault.resolve())
+    (repo / 'knowledge.toml').write_text('[format]\nversion = 1\n', encoding='utf-8')
+    result = export_sources(store, repo, owner='sean', now=NOW)
+    named = [s for s in store.list_sources() if s['provider'] == 'vault']
+    store.close()
+    assert named and named[0].get('suggested_projects'), 'the note should name the project'
+    assert 'cutover' not in _text(repo) and len(result['skipped']) == 1
 
 
 @pytest.mark.parametrize('spelling', ['Alpha', ' alpha ', 'ALPHA', '\uff41lpha', 'Alpha!'])
