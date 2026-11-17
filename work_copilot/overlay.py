@@ -1,9 +1,10 @@
 """The company overlay: which work site, knowledge space, Jira project and review room this install serves (KAN-381).
 
 team-harness renders it from the company's org overlay (`scripts/work_copilot_overlay.py --harness <name>`), so the
-harness and Work Copilot read one source. `work-copilot overlay apply <file>` checks the file and records it as
-`overlay.json` in the private data directory, with the time it was applied; `doctor` reports it. The file names
-places, never credentials, and applying it contacts nothing.
+harness and Work Copilot read one source. `overlay apply <file>`, run through the launcher (`./run.sh` or
+`.\\run.ps1`, with `--data-dir` before it), checks the file and records it as `overlay.json` in the private data
+directory, with the time it was applied; `doctor` reports it. The file names places, never credentials, and applying
+it contacts nothing.
 """
 from __future__ import annotations
 
@@ -16,12 +17,14 @@ import tempfile
 
 SCHEMA = 'work-copilot.overlay/v1'
 MAX_BYTES = 16 * 1024
-_TEXT = re.compile(r'[^\x00-\x1f\x7f]{1,200}')
+# These formats must stay identical to team-harness scripts/work_copilot_overlay.py's FORMATS, which normalises to
+# them; both repositories test the same cases, and tests/fixtures/overlay/ holds that script's output as goldens.
+_TEXT = re.compile(r'[^\x00-\x1f\x7f-\x9f\u2028\u2029]{1,200}')  # no C0 or C1 controls, DEL or line separators
 _FIELDS = {
     'name': _TEXT,
     'source': _TEXT,
     'work_site': re.compile(r'[A-Za-z0-9](?:[A-Za-z0-9-]{0,62})(?:\.[A-Za-z0-9-]{1,63}){1,10}'),
-    'kb_space': re.compile(r'[A-Za-z0-9][A-Za-z0-9_~-]{0,63}'),
+    'kb_space': re.compile(r'~?[A-Za-z0-9][A-Za-z0-9_-]{0,63}'),  # ~ first: a personal space
     'jira_project': re.compile(r'[A-Z][A-Z0-9_]{0,19}'),
     'room': _TEXT,
 }
@@ -59,8 +62,14 @@ def read(path):
         raise ValueError(f'{path} is a symlink; give the overlay file itself')
     if path.stat().st_size > MAX_BYTES:
         raise ValueError(f'{path} is larger than 16 KiB; an overlay is a few lines')
+    raw = path.read_bytes()
+    if raw[:2] in (b'\xff\xfe', b'\xfe\xff'):
+        raise ValueError(f'{path} is UTF-16 (as PowerShell\'s > writes it); render it again with '
+                         '`work_copilot_overlay.py --out <file>`, which writes UTF-8')
     try:
-        data = json.loads(path.read_text(encoding='utf-8-sig'))
+        data = json.loads(raw.decode('utf-8-sig'))
+    except UnicodeDecodeError:
+        raise ValueError(f'{path} is not UTF-8; render it again with `work_copilot_overlay.py --out <file>`') from None
     except json.JSONDecodeError as exc:
         raise ValueError(f'{path} is not JSON: {exc}') from None
     return validate(data)

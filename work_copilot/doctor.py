@@ -3,6 +3,7 @@ from importlib import metadata
 import json
 import os
 from pathlib import Path
+import shlex
 import sqlite3
 import sys
 import tempfile
@@ -175,9 +176,13 @@ def _mcp_registration_check(directory, timezone_name=None, vault=None, home=None
 
 
 def overlay_check(directory, overlay=None):
-    """Report the company overlay recorded by `work-copilot overlay apply`."""
+    """Report the company overlay recorded by `overlay apply` (run through the launcher)."""
     path = Path(overlay) if overlay else Path(directory)/'overlay.json'
-    fix = 'Render the overlay from your harness (team-harness: python scripts/work_copilot_overlay.py --harness <name> --out work-copilot-overlay.json), then run `work-copilot overlay apply work-copilot-overlay.json`.'
+    python, launcher = ('py -3', r'.\run.ps1') if os.name == 'nt' else ('python3', './run.sh')
+    data_dir = f'"{Path(directory)}"' if os.name == 'nt' else shlex.quote(str(Path(directory)))
+    fix = (f'Render the overlay from your harness (in team-harness: {python} scripts/work_copilot_overlay.py --harness <name> --out <file>), '
+           f'then apply it with your Work Copilot launcher: <your Work Copilot launcher> --data-dir {data_dir} overlay apply <file> '
+           f'(for example, from this checkout: {launcher} --data-dir {data_dir} overlay apply <file>, with <file> as an absolute path).')
     try:
         if not path.exists():
             return {'ok':False,'status':'warning','state':'not_applied','note':'No company overlay applied; defaults are generic.','fix':fix}

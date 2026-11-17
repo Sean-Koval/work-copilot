@@ -1,0 +1,10 @@
+{
+  "schema": "work-copilot.overlay/v1",
+  "name": "fictional-co",
+  "placeholder": false,
+  "source": "orgs/fictional-co/org.yaml",
+  "work_site": "fictional.example.invalid",
+  "kb_space": "FICDOCS",
+  "jira_project": "FIC",
+  "room": "Fictional review room"
+}

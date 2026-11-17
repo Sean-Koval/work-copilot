@@ -16,6 +16,60 @@ FICTIONAL = {'schema': SCHEMA, 'name': 'example-co', 'placeholder': False, 'sour
              'work_site': 'example-co.atlassian.net', 'kb_space': 'ENG', 'jira_project': 'EXMP', 'room': '#eng-review'}
 
 
+# The shared format, field -> (accepted, refused). team-harness's tests/test_work_copilot_overlay.py holds the same
+# table: keep the two identical, as the two format definitions are.
+FORMAT_CASES = {
+    'work_site': (['example-co.atlassian.net', 'wiki.example.invalid', 'a.b', 'COMPANY-SITE.atlassian.net'],
+                  ['example', '-x.example', 'example.com/wiki', 'exa mple.com', 'https://example.com', '']),
+    'kb_space': (['ENG', '~jdoe', '~5b10ac8d82e05b22cc7d4ef5', 'team_docs-2', 'x' * 64],
+                 ['~', '~~x', 'a~b', '-ENG', 'E NG', 'x' * 65, '']),
+    'jira_project': (['ENG', 'A', 'FIC_2', 'WORKPROJ'], ['eng', '1ENG', 'E-NG', 'A' * 21, '']),
+    'room': (['#eng-review', "the team's review room", 'x' * 200],
+             ['', 'a\nb', 'a\u2028b', 'a\u2029b', 'a\x85b', 'a\x9fb', 'a\x7fb', 'x' * 201]),
+}
+GOLDEN = Path(__file__).resolve().parent / 'fixtures' / 'overlay'
+
+
+@pytest.mark.parametrize('field', sorted(FORMAT_CASES))
+def test_the_shared_format(field):
+    accepted, refused = FORMAT_CASES[field]
+    for value in accepted:
+        assert validate({'schema': SCHEMA, 'name': 'x', field: value})[field] == value
+    for value in refused:
+        with pytest.raises(ValueError, match=f'{field} is not valid'):
+            validate({'schema': SCHEMA, 'name': 'x', field: value})
+
+
+@pytest.mark.parametrize('name', ['example-co', 'fictional-co'])
+def test_what_team_harness_renders_is_accepted(tmp_path, name):
+    # The exact bytes team-harness's scripts/work_copilot_overlay.py writes for orgs/example-co and for a filled-in
+    # fictional org (its tests' FICTIONAL_JSON): a golden, so a format change on either side fails here.
+    path = GOLDEN / f'{name}.json'
+    data = json.loads(path.read_text(encoding='utf-8'))
+    assert validate(data) == data and data['name'] == name and data['placeholder'] is (name == 'example-co')
+    target = tmp_path / 'data'
+    target.mkdir()
+    assert apply(target, path)['placeholder'] is (name == 'example-co')
+
+
+def test_a_utf8_bom_is_read_and_utf16_is_refused_with_the_way_out(tmp_path):
+    data = tmp_path / 'data'
+    data.mkdir()
+    text = json.dumps(FICTIONAL)
+    bom = tmp_path / 'bom.json'
+    bom.write_bytes(b'\xef\xbb\xbf' + text.encode('utf-8'))
+    assert apply(data, bom)['name'] == 'example-co'
+    for encoding in ('utf-16', 'utf-16-be'):
+        path = tmp_path / f'{encoding}.json'
+        path.write_bytes((b'\xfe\xff' if encoding.endswith('be') else b'') + text.encode(encoding))
+        with pytest.raises(ValueError, match='UTF-16.*--out'):
+            apply(data, path)
+    latin = tmp_path / 'latin.json'
+    latin.write_bytes(json.dumps({**FICTIONAL, 'room': 'caf\u00e9'}, ensure_ascii=False).encode('latin-1'))
+    with pytest.raises(ValueError, match='not UTF-8'):
+        apply(data, latin)
+
+
 def _file(tmp_path, data, name='overlay-in.json'):
     path = tmp_path / name
     path.write_text(json.dumps(data), encoding='utf-8')
@@ -59,8 +113,10 @@ def test_only_the_named_fields_are_needed(tmp_path):
     {**FICTIONAL, 'jira_project': 'exmp'},
     {**FICTIONAL, 'room': 'eng\nreview'},
     {**FICTIONAL, 'kb_space': ' ENG'},
+    {**FICTIONAL, 'room': 'eng\u2028review'},
+    {**FICTIONAL, 'name': 'example\x85co'},
 ], ids=['list', 'string', 'empty', 'schema', 'unknown-key', 'placeholder-type', 'no-name', 'site-url',
-        'project-case', 'room-newline', 'space-edge'])
+        'project-case', 'room-newline', 'space-edge', 'room-line-separator', 'name-c1'])
 def test_invalid_overlay_is_refused_and_nothing_written(tmp_path, bad):
     data = tmp_path / 'data'
     data.mkdir()
@@ -97,3 +153,5 @@ def test_cli_apply_and_show(tmp_path):
     bad = run('overlay', 'apply', str(_file(tmp_path, {'schema': 'x'}, 'bad.json')))
     assert bad.returncode == 1 and 'schema must be' in bad.stderr
     assert run('overlay', 'apply').returncode == 2
+    show_file = run('overlay', 'show', str(_file(tmp_path, FICTIONAL)))
+    assert show_file.returncode == 2 and 'overlay show takes no file' in show_file.stderr

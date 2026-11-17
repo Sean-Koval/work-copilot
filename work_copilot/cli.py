@@ -64,7 +64,7 @@ def _run():
             _review_options(p)
         elif name=='overlay':
             p.add_argument('action',choices=['apply','show'],help='apply: check an overlay file and record it in the data directory. show: print the recorded overlay')
-            p.add_argument('file',type=Path,nargs='?',help='Overlay JSON rendered by team-harness scripts/work_copilot_overlay.py')
+            p.add_argument('file',type=Path,nargs='?',help='apply only: the overlay JSON rendered by team-harness scripts/work_copilot_overlay.py --out <file>')
         elif name=='import':
             p.add_argument('file',type=Path,help='Normalized JSON envelope or source array')
         elif name in {'connect','collect'}:
@@ -104,6 +104,8 @@ def _run():
         from .doctor import diagnose_path
         print(json.dumps(diagnose_path(data,vault=args.vault,config=args.config,timezone_name=args.timezone),indent=2,default=str))
         return
+    if args.command=='overlay' and args.action=='show' and args.file is not None:
+        parser.error('overlay show takes no file; it prints the overlay recorded in the data directory (use overlay apply <file> to record one)')
     if args.command=='overlay' and args.action=='show':
         from .doctor import overlay_check
         print(json.dumps(overlay_check(data),indent=2))
