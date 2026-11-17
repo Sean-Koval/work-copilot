@@ -12,7 +12,7 @@ from uuid import uuid4
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from filelock import FileLock
-from .join_key import FIELDS as JOIN_FIELDS, join_fields
+from .join_key import FIELDS as JOIN_FIELDS, join_fields, neutralise
 from .knowledge import ENVELOPE_VERSION, validate_envelope
 
 
@@ -553,7 +553,13 @@ class Store:
             return results
 
     def track_obligation(self, payload):
-        """Create a local user-entered waiting/action record, never an external send."""
+        """Create a local user-entered waiting/action record, never an external send.
+
+        ``tracker``, ``work_id`` and ``session_key`` are the ai-dlc session join key
+        (KAN-383); they are kept only on the call that creates the record. A repeat
+        call with the same project and ``intent_key`` returns the existing record as
+        it is, so a different tracker on the repeat is ignored, not merged.
+        """
         allowed={'intent_key','title','project_id','owner','status','waiting_on','follow_up_at','due_at','question_state','commitment','evidence_ids','body',*JOIN_FIELDS}
         if not isinstance(payload,dict) or set(payload)-allowed or not all(isinstance(payload.get(k),str) and payload[k].strip() for k in ('intent_key','title')):
             raise ValueError('Structured obligation requires intent_key and title; unknown fields rejected')
@@ -584,8 +590,11 @@ class Store:
             existing=self.db.execute('SELECT id FROM obligations WHERE canonical=?',(canonical,)).fetchone()
             if existing:
                 return self._obligation(existing[0])
+            # Free text never carries a join key line: only the one written from ``join`` does.
             session=('\n\nWork-Session: '+join['session_key']) if join else ''
-            source={'id':'local/obligation/'+_id(canonical),'revision':'1','provider':'local-user','title':'User-entered obligation: '+candidate['title'],'body':'Explicitly entered by the local user. '+candidate['title']+('\n\n'+body if body else '')+session,'join':join,'projects':[project] if project else [],'obligations':[candidate]}
+            source={'id':'local/obligation/'+_id(canonical),'revision':'1','provider':'local-user','title':'User-entered obligation: '+candidate['title'],'body':neutralise('Explicitly entered by the local user. '+candidate['title']+('\n\n'+body if body else ''))+session,'projects':[project] if project else [],'obligations':[candidate]}
+            if join:
+                source['join']=join
             self.ingest([source],connector='local-user')
             oid=self.db.execute('SELECT id FROM obligations WHERE canonical=?',(canonical,)).fetchone()[0]
             for sid in ids:

@@ -38,7 +38,7 @@ from pydantic import (
     field_validator,
 )
 
-from .join_key import join_fields
+from .join_key import TICKET, join_fields, neutralise
 
 ENVELOPE_VERSION = 1
 """``schema_version`` of the source envelope (ai-dlc ``ENVELOPE_VERSION``)."""
@@ -206,8 +206,9 @@ def _join(source: dict) -> dict:
 
 
 def _ticket(source: dict) -> list[str]:
+    """The ticket to link with ``belongs_to``: only a Jira-style key, never an issue number."""
     tracker = _join(source).get('tracker')
-    return [tracker] if tracker else []
+    return [tracker] if tracker and TICKET.fullmatch(tracker) else []
 
 
 def build_record(source: dict, *, owner: str, scope: str, day: str, raw_resource: str,
@@ -220,7 +221,9 @@ def build_record(source: dict, *, owner: str, scope: str, day: str, raw_resource
         if isinstance(target, str) and target and target not in projects:
             projects.append(target)
     stale = (exported_at + CANDIDATE_WINDOW).astimezone(timezone.utc)
-    excerpt = summary(envelope['body'])
+    # The excerpt is free text: quote any key line in it, so the only key a reader
+    # finds is the one written below from the validated join fields.
+    excerpt = neutralise(summary(envelope['body']))
     fields = {
         'id': record_id(envelope['id'], envelope['provider']),
         'type': 'source',
@@ -247,7 +250,7 @@ def build_record(source: dict, *, owner: str, scope: str, day: str, raw_resource
     if excerpt:
         body += [excerpt, '']
     session = _join(source).get('session_key')
-    if session and f'Work-Session: {session}' not in excerpt.splitlines():
+    if session:
         # ai-dlc's readers find the join key on a line of its own (docs/design/session-join-key.md).
         body += [f'Work-Session: {session}', '']
     body += [f'Raw payload: `{raw_resource}`. Inbox candidate until {stale.date().isoformat()}.', '']
