@@ -121,21 +121,64 @@ class Store:
             self.db.close()
 
     def export_jsonl(self, destination):
-        """Write all recorded state as JSONL (one consistent snapshot); restore with import_jsonl."""
-        with self._transaction():
-            return schema.export_jsonl(self.db,destination,self.now().isoformat())
+        """Write all recorded state as JSONL (one consistent snapshot); restore with import_jsonl.
+
+        A read transaction: in WAL mode other processes keep writing meanwhile.
+        """
+        with self._lock:
+            self.db.execute('BEGIN')
+            try:
+                return schema.export_jsonl(self.db,destination,self.now().isoformat())
+            finally:
+                self.db.rollback()
 
     @classmethod
     def import_jsonl(cls, source, path, **options):
-        """Restore an export into a new database at ``path`` and open it."""
+        """Restore an export into a new database at ``path`` and open it.
+
+        Built beside the target, opened and checked there, and only then moved into place, so
+        a failed import leaves nothing behind and never touches an existing database.
+        """
         path=Path(path).resolve()
         path.parent.mkdir(parents=True,exist_ok=True)
+        staging=path.with_name(path.name+'.importing')
         with FileLock(str(path)+'.init.lock',timeout=30,mode=0o600):
-            result=schema.import_jsonl(source,path)
-        store=cls(path,**options)
-        # Projections are not exported; build them for the restored records.
-        store.rebuild_projections()
-        return store,result
+            for existing in (path,*schema._sidecars(path)):
+                if existing.exists():
+                    raise ValueError(f'{existing} already exists; import restores into an empty data folder only')
+            for leftover in (staging,*schema._sidecars(staging)):
+                leftover.unlink(missing_ok=True)
+            try:
+                result=schema.import_jsonl(source,staging)
+                check=cls(staging,**options)
+                try:
+                    # Projections are not exported; build them for the restored records.
+                    check.rebuild_projections()
+                    # Read every record back through the store, then discard any plan it anchors.
+                    check.db.execute('BEGIN')
+                    try:
+                        check.snapshot()
+                    finally:
+                        check.db.rollback()
+                    check.db.execute('PRAGMA journal_mode=DELETE')
+                finally:
+                    check.close()
+                try:
+                    staging.chmod(0o600)
+                except OSError:
+                    pass
+                if any(sidecar.exists() for sidecar in schema._sidecars(path)):
+                    raise ValueError('A database journal appeared beside the target during import; nothing was restored')
+                os.replace(staging,path)
+            except Exception as exc:
+                for leftover in (staging,*schema._sidecars(staging)):
+                    leftover.unlink(missing_ok=True)
+                if isinstance(exc,ValueError):
+                    raise
+                raise ValueError(f'Export holds records this Work Copilot cannot open ({type(exc).__name__}: {exc})') from exc
+            finally:
+                Path(str(staging)+'.init.lock').unlink(missing_ok=True)
+        return cls(path,**options),result
 
     def _rows(self, table):
         return [json.loads(row['payload']) for row in self.db.execute(f'SELECT payload FROM {table}')]

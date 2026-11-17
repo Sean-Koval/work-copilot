@@ -170,3 +170,85 @@ def test_cli_export_and_import_jsonl(tmp_path):
     assert _rows(tmp_path / 'a' / 'copilot.db') == _rows(tmp_path / 'b' / 'copilot.db')
     again = run('--data-dir', str(tmp_path / 'b'), 'import', '--jsonl', str(tmp_path / 'state.jsonl'))
     assert again.returncode == 1 and 'already exists' in again.stderr
+
+
+def test_failed_later_step_keeps_backup_and_earlier_steps(tmp_path, monkeypatch):
+    path = tmp_path / 'copilot.db'
+    _legacy_database(path)
+    db = sqlite3.connect(path); db.execute('PRAGMA journal_mode=WAL'); db.close()
+
+    def second(db):
+        db.execute('CREATE TABLE second_step(x)')
+
+    def third(db):
+        raise RuntimeError('third step failed')
+    monkeypatch.setattr(schema, 'MIGRATIONS', schema.MIGRATIONS + (second, third))
+    monkeypatch.setattr(schema, 'SCHEMA_VERSION', len(schema.MIGRATIONS))
+    with pytest.raises(RuntimeError):
+        Store(path)
+    db = sqlite3.connect(path)
+    assert db.execute('PRAGMA user_version').fetchone()[0] == len(schema.MIGRATIONS) - 1
+    assert db.execute("SELECT 1 FROM sqlite_master WHERE name='second_step'").fetchone()
+    backups = list((tmp_path / 'backups').glob('*.db'))
+    assert len(backups) == 1 and sqlite3.connect(backups[0]).execute('SELECT count(*) FROM sources').fetchone()[0] == 1
+
+
+def test_backups_are_private_and_pruned(tmp_path):
+    path = tmp_path / 'copilot.db'
+    for _ in range(schema.KEEP_BACKUPS + 2):
+        _legacy_database(tmp_path / 'legacy.db')
+        db = sqlite3.connect(tmp_path / 'legacy.db')
+        schema.backup(db, path, 'schema-v0')
+        db.close(); (tmp_path / 'legacy.db').unlink()
+    backups = list((tmp_path / 'backups').glob('*.db'))
+    assert len(backups) == schema.KEEP_BACKUPS
+    if sys.platform != 'win32':
+        assert all(b.stat().st_mode & 0o777 == 0o600 for b in backups)
+        assert (tmp_path / 'backups').stat().st_mode & 0o777 == 0o700
+
+
+def test_import_refuses_a_stale_journal_and_leaves_nothing_on_failure(tmp_path):
+    original = _populated(tmp_path / 'a' / 'copilot.db')
+    original.export_jsonl(tmp_path / 'state.jsonl')
+    target = tmp_path / 'b' / 'copilot.db'
+    target.parent.mkdir()
+    (target.parent / 'copilot.db-wal').write_bytes(b'stale')
+    with pytest.raises(ValueError, match='already exists'):
+        Store.import_jsonl(tmp_path / 'state.jsonl', target)
+    (target.parent / 'copilot.db-wal').unlink()
+    lines = (tmp_path / 'state.jsonl').read_text(encoding='utf-8').splitlines()
+    broken = [json.loads(line) for line in lines]
+    row = next(item for item in broken[1:] if item['table'] == 'sources')
+    row['row']['payload'] = json.dumps({'title': 'no id'})
+    (tmp_path / 'broken.jsonl').write_text('\n'.join(json.dumps(item) for item in broken) + '\n', encoding='utf-8')
+    with pytest.raises(ValueError, match='cannot open'):
+        Store.import_jsonl(tmp_path / 'broken.jsonl', target)
+    assert sorted(p.name for p in target.parent.iterdir()) == ['copilot.db.init.lock']
+    restored, _ = Store.import_jsonl(tmp_path / 'state.jsonl', target)
+    assert restored.snapshot()['obligations']
+
+
+def test_import_rejects_nan_missing_counts_and_accepts_a_bom(tmp_path):
+    _populated(tmp_path / 'a' / 'copilot.db').export_jsonl(tmp_path / 'state.jsonl')
+    lines = (tmp_path / 'state.jsonl').read_text(encoding='utf-8').splitlines()
+    (tmp_path / 'bom.jsonl').write_text('﻿' + '\n'.join(lines) + '\n', encoding='utf-8')
+    Store.import_jsonl(tmp_path / 'bom.jsonl', tmp_path / 'b' / 'copilot.db')
+    header = json.loads(lines[0]); del header['tables']
+    (tmp_path / 'nocount.jsonl').write_text(json.dumps(header) + '\n' + lines[1] + '\n', encoding='utf-8')
+    with pytest.raises(ValueError, match='row counts'):
+        Store.import_jsonl(tmp_path / 'nocount.jsonl', tmp_path / 'c' / 'copilot.db')
+    nan = lines[1].replace('"revision": 1', '"revision": NaN', 1) if '"revision": 1' in lines[1] else None
+    item = json.loads(lines[1]); key = sorted(item['row'])[0]
+    (tmp_path / 'nan.jsonl').write_text(lines[0] + '\n' + json.dumps(item).replace(json.dumps(item['row'][key]), 'NaN', 1) + '\n', encoding='utf-8')
+    with pytest.raises(ValueError, match='Line 2'):
+        Store.import_jsonl(tmp_path / 'nan.jsonl', tmp_path / 'd' / 'copilot.db')
+
+
+def test_export_does_not_block_another_writer(tmp_path):
+    store = _populated(tmp_path / 'copilot.db')
+    other = Store(tmp_path / 'copilot.db', now=NOW)
+    store.db.execute('BEGIN'); store.db.execute('SELECT count(*) FROM sources').fetchone()
+    other.db.execute('PRAGMA busy_timeout=100')
+    other.request_refresh('written while another connection reads')
+    store.db.rollback()
+    store.export_jsonl(tmp_path / 'state.jsonl')

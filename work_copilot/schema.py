@@ -62,21 +62,31 @@ def _has_state(db) -> bool:
     return any(db.execute(f'SELECT 1 FROM {table} LIMIT 1').fetchone() for table in STATE_TABLES if table in present)
 
 
+KEEP_BACKUPS = 5
+
+
 def backup(db, database_path, label) -> Path:
-    """Copy the open database, WAL included, to ``backups/`` beside it, private to the user."""
+    """Copy the open database, WAL included, to ``backups/`` beside it, private to the user.
+
+    Keeps the newest ``KEEP_BACKUPS`` copies: each holds captured work text.
+    """
     folder = Path(database_path).parent / 'backups'
     folder.mkdir(mode=0o700, exist_ok=True)
+    try:
+        folder.chmod(0o700)
+    except OSError:
+        pass
+    stem = Path(database_path).stem
     stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
-    target = folder / f'{Path(database_path).stem}-{label}-{stamp}.db'
+    target = folder / f'{stem}-{label}-{stamp}.db'
+    os.close(os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
     copy = sqlite3.connect(str(target))
     try:
         db.backup(copy)
     finally:
         copy.close()
-    try:
-        target.chmod(0o600)
-    except OSError:
-        pass
+    for old in sorted(folder.glob(f'{stem}-schema-v*-*.db'), key=lambda path: path.name.rsplit('-', 1)[-1])[:-KEEP_BACKUPS]:
+        old.unlink(missing_ok=True)
     return target
 
 
@@ -118,7 +128,7 @@ def export_jsonl(db, destination, exported_at) -> dict:
     private temporary file first and moved into place, so a failure leaves no partial export.
     """
     destination = Path(destination)
-    counts = {table: db.execute(f'SELECT count(*) FROM {table}').fetchone()[0] for table in STATE_TABLES}
+    counts = row_counts(db)
     temporary = destination.with_name(destination.name + '.partial')
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, 'O_BINARY', 0)
     handle = os.fdopen(os.open(temporary, flags, 0o600), 'w', encoding='utf-8', newline='\n')
@@ -137,29 +147,42 @@ def export_jsonl(db, destination, exported_at) -> dict:
     return {'path': str(destination), 'schema_version': header['schema_version'], 'rows': counts}
 
 
-def import_jsonl(source, database_path) -> dict:
-    """Restore an export into a new database file, then migrate it to the current schema.
+SIDECARS = ('-wal', '-shm', '-journal')
 
-    Refuses an existing database: a restore never merges into, or overwrites, live data.
-    Rows are inserted at the export's own schema version, so older exports upgrade through
-    the same migrations as an old database would.
+
+def _sidecars(path):
+    return [path.with_name(path.name + suffix) for suffix in SIDECARS]
+
+
+def _reject_constant(name):
+    raise ValueError(f'{name} is not a value an export holds')
+
+
+def import_jsonl(source, database_path) -> dict:
+    """Write an export's rows into a new database file, then migrate it to the current schema.
+
+    The caller opens and checks the result before moving it into place. Rows are inserted
+    at the export's own schema version, so older exports upgrade through the same
+    migrations an old database would.
     """
     database_path = Path(database_path)
-    if database_path.exists():
-        raise ValueError(f'{database_path} already exists; import restores into an empty data folder only')
-    with Path(source).open('r', encoding='utf-8') as handle:
+    for path in (database_path, *_sidecars(database_path)):
+        if path.exists():
+            raise ValueError(f'{path} already exists; import writes a new database only')
+    with Path(source).open('r', encoding='utf-8-sig') as handle:
         try:
-            header = json.loads(handle.readline())
-        except json.JSONDecodeError as exc:
-            raise ValueError('Not a Work Copilot JSONL export: the first line is not JSON') from exc
+            header = json.loads(handle.readline(), parse_constant=_reject_constant)
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise ValueError('Not a Work Copilot JSONL export: the first line is not a JSON header') from exc
         if not isinstance(header, dict) or header.get('kind') != EXPORT_KIND:
             raise ValueError('Not a Work Copilot JSONL export: missing export header')
         exported = header.get('schema_version')
         if type(exported) is not int or not 1 <= exported <= SCHEMA_VERSION:
             raise ValueError(f'Export schema version {exported!r} is not supported by this Work Copilot (1..{SCHEMA_VERSION})')
-        temporary = database_path.with_name(database_path.name + '.importing')
-        temporary.unlink(missing_ok=True)
-        db = sqlite3.connect(str(temporary))
+        expected = header.get('tables')
+        if not isinstance(expected, dict) or set(expected) != set(STATE_TABLES):
+            raise ValueError('Export header does not list its row counts; the file may be incomplete')
+        db = sqlite3.connect(str(database_path))
         try:
             migrate(db, None, exported)
             columns = {table: set(_columns(db, table)) for table in STATE_TABLES}
@@ -169,29 +192,25 @@ def import_jsonl(source, database_path) -> dict:
                 if not line.strip():
                     continue
                 try:
-                    item = json.loads(line)
-                except json.JSONDecodeError as exc:
-                    raise ValueError(f'Line {number} is not JSON') from exc
-                table, row = (item.get('table'), item.get('row')) if isinstance(item, dict) else (None, None)
-                if table not in columns or not isinstance(row, dict) or not row or set(row) - columns[table]:
-                    raise ValueError(f'Line {number} is not a row of a recorded table')
-                if any(not (value is None or isinstance(value, (str, int, float))) or isinstance(value, bool) for value in row.values()):
-                    raise ValueError(f'Line {number} holds a value SQLite cannot store as exported')
-                names = sorted(row)
-                db.execute(f'INSERT INTO {table}({",".join(names)}) VALUES({",".join("?" * len(names))})', [row[name] for name in names])
+                    item = json.loads(line, parse_constant=_reject_constant)
+                    table, row = (item.get('table'), item.get('row')) if isinstance(item, dict) else (None, None)
+                    if table not in columns or not isinstance(row, dict) or not row or set(row) - columns[table]:
+                        raise ValueError('not a row of a recorded table')
+                    if any(not (value is None or isinstance(value, (str, int, float))) or isinstance(value, bool) for value in row.values()):
+                        raise ValueError('holds a value SQLite cannot store as exported')
+                    names = sorted(row)
+                    db.execute(f'INSERT INTO {table}({",".join(names)}) VALUES({",".join("?" * len(names))})', [row[name] for name in names])
+                except (ValueError, OverflowError, sqlite3.Error) as exc:
+                    raise ValueError(f'Line {number}: {exc}') from exc
                 counts[table] += 1
-            if header.get('tables') is not None and header['tables'] != counts:
+            if expected != counts:
                 raise ValueError('Export is incomplete: row counts differ from its header')
             db.commit()
             migrated = migrate(db, None)
-        except BaseException:
+        finally:
             db.close()
-            temporary.unlink(missing_ok=True)
-            raise
-        db.close()
-    try:
-        temporary.chmod(0o600)
-    except OSError:
-        pass
-    os.replace(temporary, database_path)
     return {'path': str(database_path), 'from_schema_version': exported, 'schema_version': migrated['to'], 'rows': counts}
+
+
+def row_counts(db) -> dict:
+    return {table: db.execute(f'SELECT count(*) FROM {table}').fetchone()[0] for table in STATE_TABLES}
