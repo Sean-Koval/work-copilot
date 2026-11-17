@@ -91,11 +91,11 @@ An item is kept when its `room_id` is a listed room or its `space_key` is a list
 
 Text older than `retention_days` (default 30) is removed on every `collect` or `connect`, failed or not, and when Work Copilot opens, at most once an hour. Age counts from `observed_at` or from when it was copied, whichever is earlier. The source keeps a pointer: its id, link, title, projects and a hash of the removed text. Drafts lose the passages they quoted. Obligations, with their titles, and evidence links stay.
 
-Older revisions, and sources deleted upstream, keep only a hash from the next run. Once any text expires, every schema backup in `backups/` is deleted, since each is a full copy.
+Older revisions, and sources deleted upstream, keep only a hash from the next run. The same text is cleared inside each schema backup in `backups/`, which is kept as a rollback copy under the usual backup cleanup.
 
-`work-copilot forget --source <id>` removes one source's text from the database: revisions, search, quoted passages in drafts, and every schema backup. Obligations made from it keep their titles. Copies outside the database stay: JSONL exports, the generated wiki and knowledge records. A later collection does not copy it back.
+`work-copilot forget --source <id>` removes one source's text from the database: revisions, search, quoted passages in drafts, and the same text inside every schema backup. Obligations made from it keep their titles. Copies outside the database stay: JSONL exports, the generated wiki and knowledge records. A later collection does not copy it back.
 
-Removed text is overwritten in the database file. A file another program holds open can't be cleared at once; the result reports `wal_cleared` and `backups_left`, and the next run tries again.
+Removed text is overwritten in the database file. A file another program holds open can't be cleared at once; the result reports `wal_cleared` and `backups_left`, and the next run tries again. A backup that can't be cleared is deleted once it is seven days old.
 
 ```sh
 work-copilot collect --config ~/.config/work-copilot/symphony.json

@@ -94,23 +94,16 @@ def test_retention_touches_only_its_connector(store):
     assert store.source('symphony:room-1:1')['body'] == SECRET
 
 
-def test_retention_removes_backups_past_the_limit(store, tmp_path):
-    folder = tmp_path / 'backups'
-    folder.mkdir()
-    old = folder / f'copilot-schema-v0-{(START - timedelta(days=8)).strftime("%Y%m%dT%H%M%S%fZ")}.db'
-    new = folder / f'copilot-schema-v0-{(START - timedelta(days=2)).strftime("%Y%m%dT%H%M%S%fZ")}.db'
-    old.write_bytes(b'x'); new.write_bytes(b'x')
-    assert store.apply_retention('symphony', 7)['backups_removed'] == 1
-    assert schema.backups(tmp_path / 'copilot.db') == [new]
-
-
 def test_forget_removes_a_source_its_text_and_backups(store, tmp_path):
     store.ingest([message(1), message(2, body='Other text')], connector='symphony')
-    (tmp_path / 'backups').mkdir()
-    (tmp_path / 'backups' / 'copilot-schema-v0-20261101T120000000000Z.db').write_bytes(b'copy')
+    backup = schema.backup(store.db, store.path, 'schema-v1')
     obligation = next(o for o in store.snapshot()['obligations'] if o['intent_key'] == 'reply-1')
     report = store.forget('symphony:room-1:1')
-    assert report == {'forgotten': 'symphony:room-1:1', 'stale_drafts': 0, 'backups_removed': 1, 'backups_left': 0, 'wal_cleared': True}
+    assert report == {'forgotten': 'symphony:room-1:1', 'stale_drafts': 0, 'wal_cleared': True,
+                      'backups_cleared': 1, 'backups_removed': 0, 'backups_left': 0}
+    # The backup is kept as a rollback copy, without the forgotten source.
+    assert backup.exists() and SECRET.encode() not in backup.read_bytes()
+    assert 'Other text' in _dump(backup) and 'symphony:room-1:1' not in _dump(backup)
     assert store.source('symphony:room-1:1') is None and not store.search('confidential')
     assert store.obligation(obligation['id'])['evidence'] == []
     assert store.ingest([message(1)], connector='symphony')['forgotten'] == 1
@@ -216,29 +209,6 @@ def test_forget_removes_quoted_text_from_drafts(store, tmp_path):
     assert SECRET.encode() not in _raw(tmp_path)
 
 
-def test_any_expiry_removes_every_backup_however_new(store, tmp_path):
-    store.ingest([message(1)], connector='symphony')
-    young = _real_backup(tmp_path, START + timedelta(days=30))
-    store.clock.value = START + timedelta(days=31)
-    report = store.apply_retention('symphony', 30)
-    assert report['expired_bodies'] == 1 and report['backups_removed'] == 1 and not young.exists()
-
-
-def test_a_backup_that_cannot_be_removed_is_reported(store, tmp_path, monkeypatch):
-    store.ingest([message(1)], connector='symphony')
-    _real_backup(tmp_path, START)
-    original = type(tmp_path).unlink
-
-    def held_open(self, missing_ok=False):
-        if self.parent.name == 'backups':
-            raise PermissionError(32, 'in use')
-        return original(self, missing_ok=missing_ok)
-
-    monkeypatch.setattr(type(tmp_path), 'unlink', held_open)
-    report = store.forget('symphony:room-1:1')
-    assert report['backups_removed'] == 0 and report['backups_left'] == 1
-
-
 def test_retention_runs_on_open_at_most_hourly(tmp_path):
     clock = Clock()
     store = Store(tmp_path / 'copilot.db', now=clock)
@@ -274,3 +244,42 @@ def test_known_sources_pass_the_room_filter():
     items = [{'id': 'old', 'deleted': True}, {'id': 'new'}]
     kept, skipped = select_captured(items, {'rooms': ['room-1'], 'spaces': [], 'retention_days': 30}, known=lambda sid: sid == 'old')
     assert [item['id'] for item in kept] == ['old'] and skipped == 1
+
+
+def test_expiry_clears_text_inside_backups_and_keeps_them(store, tmp_path):
+    store.ingest([message(1, body='First draft of the numbers'), message(2, body='Still current')], connector='symphony')
+    store.ingest([message(1, revision='2', observed=START + timedelta(hours=1))], connector='symphony')
+    store.clock.value = START + timedelta(hours=2)
+    store.ingest([message(2, revision='2', body='Still current, edited', observed=START + timedelta(hours=2))], connector='symphony')
+    obligation = next(o for o in store.snapshot()['obligations'] if o['intent_key'] == 'reply-1')
+    store.draft(obligation['id'])
+    # A pre-upgrade backup, taken while all of that text was live.
+    backup = schema.backup(store.db, store.path, 'schema-v1')
+    assert SECRET.encode() in backup.read_bytes() and b'First draft' in backup.read_bytes()
+    store.ingest([message(1, revision='3', deleted=True, observed=START + timedelta(hours=3))], connector='symphony')
+    report = store.apply_retention('symphony', 30)
+    assert report['backups_cleared'] == 1 and report['backups_removed'] == 0 and report['backups_left'] == 0
+    raw = backup.read_bytes()
+    assert backup.exists() and SECRET.encode() not in raw and b'First draft' not in raw
+    # The expired source and every replaced revision lose their text; the current text stays.
+    assert b'Still current, edited' in raw and b'Still current' not in raw.replace(b'Still current, edited', b'')
+    copy = sqlite3.connect(backup)
+    try:
+        body, retained = copy.execute("SELECT json_extract(payload,'$.body'),json_extract(payload,'$.retained') FROM sources WHERE id='symphony:room-1:1'").fetchone()
+        assert body == '' and json.loads(retained)['retention_days'] == 30
+        assert copy.execute("SELECT count(*) FROM local_metadata WHERE key='projections'").fetchone()[0] == 0
+    finally:
+        copy.close()
+
+
+def test_a_young_backup_that_cannot_be_cleared_is_kept_and_reported(store, tmp_path):
+    store.ingest([message(1)], connector='symphony')
+    folder = tmp_path / 'backups'
+    folder.mkdir()
+    young = folder / f'copilot-schema-v0-{START.strftime("%Y%m%dT%H%M%S%fZ")}.db'
+    old = folder / f'copilot-schema-v0-{(START - timedelta(days=8)).strftime("%Y%m%dT%H%M%S%fZ")}.db'
+    young.write_bytes(b'not a database'); old.write_bytes(b'not a database')
+    report = store.forget('symphony:room-1:1')
+    # Under seven days old, a rollback copy is never deleted, even when it can't be cleared.
+    assert report['backups_left'] == 1 and young.exists()
+    assert report['backups_removed'] == 1 and not old.exists()
