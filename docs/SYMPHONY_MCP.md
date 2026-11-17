@@ -95,7 +95,7 @@ Older revisions, and sources deleted upstream, keep only a hash from the next ru
 
 `work-copilot forget --source <id>` removes one source's text from the database: revisions, search, quoted passages in drafts, and the same text inside every schema backup. Obligations made from it keep their titles. Copies outside the database stay: JSONL exports, the generated wiki and knowledge records. A later collection does not copy it back.
 
-Removed text is overwritten in the database file. A file another program holds open can't be cleared at once; the result reports `wal_cleared` and `backups_left`, and the next run tries again. A backup that can't be cleared is deleted once it is seven days old.
+Removed text is overwritten in the database file. A file another program holds open can't be cleared at once; the result reports `wal_cleared` and `backups_left`, and the next run tries again. A backup that can't be cleared (held open or damaged) keeps its text until it is cleared on a later run or, at seven days old, deleted: that is the price of keeping a rollback copy.
 
 ```sh
 work-copilot collect --config ~/.config/work-copilot/symphony.json

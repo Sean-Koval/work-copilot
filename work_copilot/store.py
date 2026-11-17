@@ -76,10 +76,15 @@ def _clear_backup(path, retained, redacted, forgotten):
         for sid,revision in redacted:
             old_revisions.setdefault(sid,set()).add(revision)
         quotes={}
+        # A backup taken before an edit holds, as its current row, a revision live has since
+        # replaced and redacted: that row's text goes too.
+        superseded=set()
         if 'sources' in tables:
-            for sid,payload in db.execute('SELECT id,payload FROM sources'):
-                if sid in gone:
+            for sid,revision,payload in db.execute('SELECT id,revision,payload FROM sources'):
+                if sid in gone or (sid,revision) in redacted:
                     quotes.setdefault(sid,[]).append(_excerpt(json.loads(payload).get('body')))
+                    if sid not in gone:
+                        superseded.add((sid,revision))
         if 'source_revisions' in tables:
             for sid,revision,payload in db.execute('SELECT id,revision,payload FROM source_revisions'):
                 if sid in gone or revision in old_revisions.get(sid,()):
@@ -95,6 +100,9 @@ def _clear_backup(path, retained, redacted, forgotten):
             if 'sources' in tables:
                 for sid,mark in retained.items():
                     db.execute("UPDATE sources SET payload=json_set(payload,'$.body','','$.retained',json(?)) WHERE id=?",(_json(mark),sid))
+            for sid,revision in superseded:
+                mark=json.loads(redacted[(sid,revision)])['redacted']
+                db.execute("UPDATE sources SET payload=json_set(payload,'$.body','','$.redacted',json(?)) WHERE id=? AND revision=?",(_json(mark),sid,revision))
             if 'source_revisions' in tables:
                 for (sid,revision),pointer in redacted.items():
                     db.execute('UPDATE source_revisions SET payload=? WHERE id=? AND revision=?',(pointer,sid,revision))
@@ -104,7 +112,7 @@ def _clear_backup(path, retained, redacted, forgotten):
                     if table in tables:
                         db.execute(f'DELETE FROM {table} WHERE {column}=?',(sid,))
             if 'source_search' in tables:
-                for sid in set(retained)|set(forgotten):
+                for sid in set(retained)|set(forgotten)|{sid for sid,_ in superseded}:
                     db.execute('DELETE FROM source_search WHERE source_id=?',(sid,))
             if 'local_metadata' in tables:
                 # A restored copy rebuilds search and project links from what is left.
@@ -1018,7 +1026,8 @@ class Store:
                     expired+=1
             self.db.execute('INSERT INTO local_metadata VALUES(?,?) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload',('retention-run:'+connector,_json({'at':now.isoformat(),'days':days})))
         wal_cleared=self._compact(optimize=expired>0) if (expired or redacted or scrubbed) else True
-        backups=self._scrub_backups() if (expired or redacted) else {'backups_cleared':0,'backups_removed':0,'backups_left':0}
+        pending=self.db.execute("SELECT 1 FROM local_metadata WHERE key='backups-pending'").fetchone()
+        backups=self._scrub_backups() if (expired or redacted or pending) else {'backups_cleared':0,'backups_removed':0,'backups_left':0}
         return {'expired_bodies':expired,'redacted_revisions':redacted,'drafts_scrubbed':scrubbed,'wal_cleared':wal_cleared,**backups}
 
     def _scrub_drafts(self, source_id, bodies, revisions=None):
@@ -1064,6 +1073,13 @@ class Store:
                 except (ValueError,OSError):
                     pass
                 report['backups_left']+=1
+        # A backup left holding text is tried again on the next retention run, even one that
+        # expires nothing new (retention also runs on open, hourly).
+        with self._transaction():
+            if report['backups_left']:
+                self.db.execute("INSERT INTO local_metadata VALUES('backups-pending',?) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload",(_json({'left':report['backups_left']}),))
+            else:
+                self.db.execute("DELETE FROM local_metadata WHERE key='backups-pending'")
         return report
 
     def forget(self, source_id):

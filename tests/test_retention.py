@@ -283,3 +283,41 @@ def test_a_young_backup_that_cannot_be_cleared_is_kept_and_reported(store, tmp_p
     # Under seven days old, a rollback copy is never deleted, even when it can't be cleared.
     assert report['backups_left'] == 1 and young.exists()
     assert report['backups_removed'] == 1 and not old.exists()
+
+
+def test_a_backup_taken_before_an_edit_loses_the_replaced_text(store, tmp_path):
+    store.ingest([message(2, body='Original wording before edit')], connector='symphony')
+    backup = schema.backup(store.db, store.path, 'schema-v1')
+    store.clock.value = START + timedelta(hours=1)
+    store.ingest([message(2, revision='2', body='Edited wording', observed=START + timedelta(hours=1))], connector='symphony')
+    report = store.apply_retention('symphony', 30)
+    assert report['redacted_revisions'] == 1 and report['backups_cleared'] == 1
+    assert b'Original wording' not in backup.read_bytes()
+    copy = sqlite3.connect(backup)
+    try:
+        assert copy.execute("SELECT count(*) FROM source_search WHERE source_search MATCH 'Original'").fetchone()[0] == 0
+        body, redacted = copy.execute("SELECT json_extract(payload,'$.body'),json_extract(payload,'$.redacted') FROM sources WHERE id='symphony:room-1:2'").fetchone()
+        assert body == '' and len(json.loads(redacted)['content_sha256']) == 64
+    finally:
+        copy.close()
+
+
+def test_a_backup_left_holding_text_is_retried_without_new_expiry(store, tmp_path, monkeypatch):
+    from work_copilot import store as store_module
+    store.ingest([message(1)], connector='symphony')
+    store.clock.value = START + timedelta(days=31)
+    taken = schema.backup(store.db, store.path, 'schema-v1')
+    # Named as taken a day before the run, so it is under the seven-day floor.
+    backup = taken.with_name(f'copilot-schema-v1-{(store.clock.value - timedelta(days=1)).strftime("%Y%m%dT%H%M%S%fZ")}.db')
+    taken.rename(backup)
+    real = store_module._clear_backup
+
+    def held_open(*args):
+        raise sqlite3.OperationalError('database is locked')
+
+    monkeypatch.setattr(store_module, '_clear_backup', held_open)
+    assert store.apply_retention('symphony', 30)['backups_left'] == 1
+    monkeypatch.setattr(store_module, '_clear_backup', real)
+    report = store.apply_retention('symphony', 30)
+    assert report['expired_bodies'] == 0 and report['backups_cleared'] == 1 and report['backups_left'] == 0
+    assert SECRET.encode() not in backup.read_bytes()
