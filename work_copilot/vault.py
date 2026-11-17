@@ -70,20 +70,44 @@ def _read(root: Path, relative: Path) -> bytes:
 
 
 def _metadata(text: str) -> dict:
+    """Read ``project_ids``, ``workstream`` and ``obligations`` from a note's frontmatter.
+
+    Each value is one JSON line. A knowledge record (KAN-394) names its projects as
+    ``belongs_to`` links and its workstream as a ``workstream:<name>`` tag; those are read
+    when the older keys are absent. A record obligation without ``project_id`` belongs to
+    the note's one project when it names exactly one.
+    """
     lines = text.splitlines()
-    result = {}
+    result, record = {}, {}
     if not lines or lines[0].strip() != '---':
         return result
     for line in lines[1:]:
         if line.strip() == '---':
             break
         key, sep, value = line.partition(':')
-        if sep and key.strip() in {'project_ids', 'workstream', 'obligations'}:
+        key = key.strip()
+        if sep and key in {'project_ids', 'workstream', 'obligations', 'links', 'tags', 'type'}:
             value = value.strip()
             try:
-                result[key.strip()] = json.loads(value)
+                parsed = json.loads(value)
             except json.JSONDecodeError:
-                result[key.strip()] = value.strip('"\'')
+                parsed = value.strip('"\'')
+            (record if key in {'links', 'tags', 'type'} else result)[key] = parsed
+    if not record.get('type'):
+        return result
+    links = record.get('links') if isinstance(record.get('links'), list) else []
+    if 'project_ids' not in result:
+        result['project_ids'] = list(dict.fromkeys(
+            link['target'] for link in links
+            if isinstance(link, dict) and link.get('type') == 'belongs_to' and isinstance(link.get('target'), str) and link['target'].strip()))
+    tags = record.get('tags') if isinstance(record.get('tags'), list) else []
+    if 'workstream' not in result:
+        named = [tag.split(':', 1)[1] for tag in tags if isinstance(tag, str) and tag.startswith('workstream:') and tag.split(':', 1)[1].strip()]
+        if named:
+            result['workstream'] = named[0]
+    obligations = result.get('obligations')
+    if isinstance(obligations, list) and len(result['project_ids']) == 1:
+        result['obligations'] = [{**o, 'project_id': result['project_ids'][0]} if isinstance(o, dict) and 'project_id' not in o else o for o in obligations]
     return result
 
 
@@ -252,9 +276,29 @@ def _export_projects_unlocked(store, destination) -> dict:
     return {'directory': str(target), 'files': sorted(outputs)}
 
 
+def _split_pasted(body: str) -> tuple[str | None, str]:
+    """Return ``(pasted frontmatter text, rest)``; ``None`` when the body has none."""
+    lines = body.splitlines(keepends=True)
+    if not lines or lines[0].strip() != '---':
+        return None, body
+    closing = next((i for i in range(1, len(lines)) if lines[i].strip() == '---'), None)
+    if closing is None:
+        return None, body
+    return ''.join(lines[1:closing]), ''.join(lines[closing + 1:])
+
+
 def _write_inbox_note_unlocked(store, root, title: str, body: str, project_ids: list[str] | None = None, workstream: str | None = None, project_id: str | None = None) -> dict:
-    """Create a new local note only in the explicitly selected vault Inbox."""
+    """Create a new local note only in the explicitly selected vault Inbox.
+
+    The note's frontmatter is an ai-dlc knowledge record (a ``source`` record, status
+    ``raw``; KAN-394), so ``ai-dlc knowledge check`` reads it with no second grammar.
+    Frontmatter pasted at the top of ``body`` is never lost: its ``project_ids``,
+    ``workstream`` and ``obligations`` are carried into the record, and its text is kept
+    verbatim in the body. Obligation fields the record cannot hold are listed in
+    ``not_in_header``.
+    """
     import uuid
+    from .knowledge import capture_record_header
     root = _root(root)
     if not isinstance(body, str) or not body.strip() or len(body.encode('utf-8')) > _MAX_NOTE - 1000:
         raise ValueError('Note body is required and must fit the 2 MB intake limit')
@@ -267,56 +311,55 @@ def _write_inbox_note_unlocked(store, root, title: str, body: str, project_ids: 
         raise ValueError('Select up to 20 nonempty stable project IDs')
     if workstream is not None and (not isinstance(workstream, str) or not workstream.strip() or len(workstream) > 200):
         raise ValueError('Workstream must be a nonempty string up to 200 characters')
-    if selected or workstream:
-        lines = body.splitlines(keepends=True)
-        closing = next((i for i in range(1, len(lines)) if lines[i].strip() == '---'), None) if lines and lines[0].strip() == '---' else None
-        frontmatter = ''.join(lines[1:closing]) if closing is not None else ''
-        rest = ''.join(lines[closing + 1:]) if closing is not None else body
-        additions = []
-        if selected:
-            existing = _metadata(body).get('project_ids', [])
-            if isinstance(existing, str):
-                existing = [existing]
-            if not isinstance(existing, list) or not all(isinstance(p, str) for p in existing):
-                raise ValueError('Existing project_ids metadata must contain stable ID strings')
-            additions.append('project_ids: ' + json.dumps(list(dict.fromkeys([*existing, *selected]))))
-        if workstream:
-            additions.append('workstream: ' + json.dumps(workstream))
-        body = '---\n' + frontmatter + '\n'.join(additions) + '\n---\n' + rest
+    pasted, rest = _split_pasted(body)
+    meta = _metadata('---\n' + pasted + '---\n') if pasted is not None else {}
+    existing = meta.get('project_ids', [])
+    if isinstance(existing, str):
+        existing = [existing]
+    if not isinstance(existing, list) or not all(isinstance(p, str) and p.strip() for p in existing):
+        raise ValueError('Existing project_ids metadata must contain stable ID strings')
+    projects = list(dict.fromkeys([*existing, *selected]))
+    if workstream is None and isinstance(meta.get('workstream'), str) and meta['workstream'].strip():
+        workstream = meta['workstream']
+    obligations = meta.get('obligations', [])
+    if not isinstance(obligations, list) or not all(isinstance(o, dict) for o in obligations):
+        raise ValueError('obligations must be a JSON array of objects')
     title = ' '.join(str(title).split())[:200] or 'Captured context'
     inbox = root / 'Inbox'
     if inbox.is_symlink():
         raise ValueError('Inbox cannot be a symlink')
     inbox.mkdir(exist_ok=True)
-    name = datetime.now(timezone.utc).strftime('%Y-%m-%d-') + uuid.uuid4().hex + '.md'
-    content = f'# {title}\n\n{body}\n'
-    lines = body.splitlines(keepends=True)
-    if lines and lines[0].strip() == '---':
-        closing = next((i for i in range(1, len(lines)) if lines[i].strip() == '---'), None)
-        if closing is not None:
-            frontmatter = ''.join(lines[:closing + 1]).rstrip('\r\n')
-            rest = ''.join(lines[closing + 1:])
-            content = f'{frontmatter}\n\n# {title}\n\n{rest}\n'
+    moment = datetime.now(timezone.utc)
+    name = moment.strftime('%Y-%m-%d-') + uuid.uuid4().hex + '.md'
+    namespace = hashlib.sha256(str(root).encode()).hexdigest()[:20]
+    source_id = f'vault:{namespace}:Inbox/{name}'
+    payload = f'\n# {title}\n\n{rest.strip(chr(10))}\n'
+    if pasted is not None and pasted.strip():
+        payload += '\n## Pasted frontmatter\n\n```yaml\n' + pasted.rstrip('\n') + '\n```\n'
+    header, not_in_header = capture_record_header(
+        source_id=source_id, resource=f'Inbox/{name}', title=title, payload=payload,
+        projects=projects, workstream=workstream, obligations=obligations,
+        owner=os.environ.get('WORK_COPILOT_KNOWLEDGE_OWNER'), now=moment)
+    content = header + payload
     if os.name == 'posix':
         rootfd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
             directory = os.open('Inbox', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=rootfd)
             try:
                 fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory)
-                with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+                with os.fdopen(fd, 'w', encoding='utf-8', newline='\n') as handle:
                     handle.write(content)
             finally:
                 os.close(directory)
         finally:
             os.close(rootfd)
     else:
-        with (inbox / name).open('x', encoding='utf-8') as handle:
+        with (inbox / name).open('x', encoding='utf-8', newline='\n') as handle:
             handle.write(content)
     capture = capture_vault(store, root)
-    namespace = hashlib.sha256(str(root).encode()).hexdigest()[:20]
-    source_id = f'vault:{namespace}:Inbox/{name}'
-    obligations = [o['id'] for o in store.snapshot().get('obligations', []) if any(s.get('id') == source_id for s in o.get('evidence', []))]
-    return {'path': str(inbox / name), 'source_ids': [source_id], 'obligation_ids': obligations, 'capture': capture}
+    obligation_ids = [o['id'] for o in store.snapshot().get('obligations', []) if any(s.get('id') == source_id for s in o.get('evidence', []))]
+    return {'path': str(inbox / name), 'source_ids': [source_id], 'obligation_ids': obligation_ids,
+            'not_in_header': not_in_header, 'capture': capture}
 
 
 def write_inbox_note(store, root, title: str, body: str, project_ids=None, workstream=None, project_id=None) -> dict:
