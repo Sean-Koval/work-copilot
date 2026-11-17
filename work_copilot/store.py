@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from filelock import FileLock
 from .knowledge import ENVELOPE_VERSION, validate_envelope
+from .rules import Rules
 
 
 class ConflictError(ValueError):
@@ -38,7 +39,7 @@ def _id(value):
 
 
 class Store:
-    def __init__(self, path, now=None, timezone_name=None):
+    def __init__(self, path, now=None, timezone_name=None, rules=None):
         self.timezone_name=timezone_name or os.environ.get("WORK_COPILOT_TIMEZONE", "UTC")
         try:
             self.timezone=ZoneInfo(self.timezone_name)
@@ -46,6 +47,8 @@ class Store:
             raise ValueError("Unknown IANA timezone: "+self.timezone_name) from exc
         self.path = Path(path).resolve()
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        # Team rules (owner, draft wording); rules.json beside the database overrides the defaults.
+        self.rules = rules if rules is not None else Rules.load(self.path.parent)
         self._clock = now or (lambda: datetime.now(timezone.utc))
         self._lock = threading.RLock()
         # Include connection PRAGMAs: journal_mode can race before SQLite's
@@ -300,7 +303,7 @@ class Store:
                         exists=existing_row
                         if not exists:
                             owner=candidate.get('owner')
-                            ob={'id':oid,'intent_key':candidate['intent_key'],'title':candidate['title'],'project_id':candidate.get('project_id'),'owner':owner,'status':candidate.get('status','open' if owner=='me' else 'candidate'),'question_state':candidate.get('question_state','pending'),'due_at':candidate.get('due_at'),'follow_up_at':candidate.get('follow_up_at'),'waiting_on':candidate.get('waiting_on'),'commitment':bool(candidate.get('commitment',False)),'revision':1,'created_at':self.now().isoformat(),'reviewed':False}
+                            ob={'id':oid,'intent_key':candidate['intent_key'],'title':candidate['title'],'project_id':candidate.get('project_id'),'owner':owner,'status':candidate.get('status',self.rules.initial_status(owner)),'question_state':candidate.get('question_state','pending'),'due_at':candidate.get('due_at'),'follow_up_at':candidate.get('follow_up_at'),'waiting_on':candidate.get('waiting_on'),'commitment':bool(candidate.get('commitment',False)),'revision':1,'created_at':self.now().isoformat(),'reviewed':False}
                             self._validate_changes(ob)
                             self.db.execute('INSERT INTO obligations VALUES(?,?,?)',(oid,canonical,_json(ob)))
                         if exists:
@@ -397,7 +400,7 @@ class Store:
             active=[o for o in obligations if o['status'] not in ('resolved','dismissed')]
             row=self.db.execute('SELECT payload FROM plans WHERE day=?',(day,)).fetchone()
             existing=json.loads(row[0]) if row else None
-            eligible=[o for o in active if o.get('owner')=='me' and o['status']=='open']
+            eligible=[o for o in active if self.rules.is_mine(o) and o['status']=='open']
             eligible_ids={o['id'] for o in eligible}
             if existing and (existing.get('anchored') or existing['priorities']):
                 today=existing
@@ -440,33 +443,19 @@ class Store:
             if not ob.get('owner'): gaps.append('Ownership is not confirmed.')
             if not evidence: gaps.append('No current source evidence is available.')
             if not ob.get('due_at'): gaps.append('No deadline is established.')
-            gaps.append('Deployment is not verified unless explicitly evidenced; a merged PR alone is not deployment.')
+            gaps.extend(self.rules.standing_gaps)
             direct={s['id'] for s in ob['evidence']}
             evidence.sort(key=lambda source:(source['id'] not in direct,source['id']))
-            if any(word in ob['intent_key'].lower() for word in ('release','deployment')) and len(evidence)>1:
-                engineering=next((source for source in evidence[1:] if 'github' in source['provider'].lower()),None)
-                if engineering:
-                    evidence.remove(engineering)
-                    evidence.insert(1,engineering)
-            if ob['intent_key']=='request-missing-transcript' and ob['question_state']=='sent':
-                lines=['The transcript request is already recorded as sent. Check for a response before sending another request.']
-            elif ob['intent_key']=='request-missing-transcript' and ob['question_state']=='answered':
-                lines=['The transcript request is recorded as answered. Review the received evidence; do not request it again automatically.']
-            elif ob['intent_key']=='request-missing-transcript':
-                lines=['Could you share the meeting transcript or notes when available? I do not have the transcript, so I cannot yet summarize the discussion or confirm its decisions.']
-            else:
+            evidence=self.rules.order_evidence(ob,evidence)
+            lines=self.rules.reply(ob)
+            if lines is None:
                 lines=[]
                 for index,source in enumerate(evidence[:2],1):
                     excerpt=source['body'].strip().replace('\n',' ')[:220]
                     lines.append(f'Observed source [{index}] says: “{excerpt}”')
                 if not evidence:
                     lines.append('I do not have current evidence to give a reliable status yet.')
-                if any(word in ob['intent_key'].lower() for word in ('release','deployment')):
-                    lines.append('Deployment is not verified by this evidence packet; merged code is not a deployment receipt. No delivery date is established here.')
-                if ob['question_state']=='sent':
-                    lines.append('A clarification is already recorded as sent; check for a response rather than ask again.')
-                elif ob['question_state']=='answered':
-                    lines.append('This intent is already recorded as answered; check whether another reply is needed.')
+                lines.extend(self.rules.notes(ob))
             freshness=self._freshness(evidence)
             if freshness!='observed':
                 gaps.append('Evidence is '+freshness+'; refresh or obtain missing evidence before relying on this draft.')
@@ -560,7 +549,7 @@ class Store:
         if not isinstance(body,str) or len(body)>100000:
             raise ValueError('Body must be text of at most 100000 characters')
         candidate={k:v for k,v in payload.items() if k not in ('evidence_ids','body')}
-        candidate.setdefault('owner','me'); candidate.setdefault('status','waiting')
+        candidate.setdefault('owner',self.rules.self_owner); candidate.setdefault('status','waiting')
         self._validate_changes(candidate)
         ids=payload.get('evidence_ids',[])
         if not isinstance(ids,list) or not all(isinstance(sid,str) for sid in ids):
@@ -625,7 +614,7 @@ class Store:
                     oid=ob['id']
                 else:
                     oid=_id(canonical)
-                    ob={'id':oid,'intent_key':'review:'+item['key'],'kind':'review',**values,'project_id':None,'owner':'me','status':'open','question_state':'pending','follow_up_at':None,'waiting_on':None,'commitment':False,'revision':1,'created_at':self.now().isoformat(),'reviewed':True}
+                    ob={'id':oid,'intent_key':'review:'+item['key'],'kind':'review',**values,'project_id':None,'owner':self.rules.self_owner,'status':'open','question_state':'pending','follow_up_at':None,'waiting_on':None,'commitment':False,'revision':1,'created_at':self.now().isoformat(),'reviewed':True}
                     self.db.execute('INSERT INTO obligations VALUES(?,?,?)',(oid,canonical,_json(ob)))
                     opened.append(oid)
                 self.db.execute('INSERT OR IGNORE INTO evidence VALUES(?,?)',(oid,sid))
@@ -696,7 +685,7 @@ class Store:
                 raise ConflictError('Today changed; reload before pinning priorities')
             for oid in ids:
                 ob=self._obligation(oid)
-                if ob.get('owner')!='me' or ob['status']!='open':
+                if not self.rules.is_mine(ob) or ob['status']!='open':
                     raise ValueError('Only personally owned open obligations can be pinned')
             today.update(priorities=list(ids),kind='pinned',revision=revision+1,anchored=True)
             today.pop('new_urgency',None)

@@ -149,6 +149,8 @@ For example: “Thanks for flagging this. Which environment shows the error?” 
 
 Keep an internal evidence ledger separate from outgoing prose. Record which source supports each material claim, contradictions checked, missing facts, and the snapshot revision used. The user can inspect it; recipients receive only appropriate content and citations they are authorized to see. Never include inaccessible source excerpts just because the assistant can retrieve them.
 
+The offline draft templates follow team rules in `work_copilot/rules.py`, not the store: who "me" is, the gaps every draft lists, canned replies for an intent (a missing transcript), which provider's evidence is quoted second for an intent (engineering evidence for a release question) and the lines added after the evidence. A team changes them with a `rules.json` beside the database; it may replace any top-level key of `DEFAULT_RULES`, and unknown keys are refused.
+
 Learn tone from user-approved examples and explicit preferences, not private messages indiscriminately. Style can change phrasing; it cannot create facts or commitments. Version skills and runbooks as reusable procedures with owners and review dates. Store project facts in evidence-backed memory, not in skills that silently become outdated.
 
 ## Approval and execution safety
