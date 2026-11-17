@@ -856,6 +856,16 @@ class Store:
         """
         if not re.fullmatch(r'[0-9a-f]{32}',vault_id) or not all(re.fullmatch(r'[0-9a-f]{20}|[0-9a-f]{32}',old) for old in old_namespaces):
             raise ValueError('Invalid vault namespace')
+        # A rename can delete duplicate rows and merge obligations, which can't be undone, so
+        # copy the database to backups/ first, whenever an earlier namespace still has rows.
+        backup=None
+        with self._lock:
+            candidates={old for old in old_namespaces if old!=vault_id}
+            previous=self._metadata('vault-at:'+root,{}).get('vault_id')
+            if previous and previous!=vault_id:
+                candidates.add(previous)
+            if any(self._namespace_in_use(old) for old in candidates):
+                backup=str(schema.backup(self.db,self.path,f'schema-v{schema.version(self.db)}-vault-id'))
         with self._transaction():
             if self._metadata('vault-root:'+vault_id,{}).get('root')!=expected_root:
                 raise ValueError('Another capture of this vault ran at the same time; capture again')
@@ -886,7 +896,13 @@ class Store:
                 # Inbox note headers still carry the old ids until the vault rewrites them.
                 pending=self._metadata('vault-headers:'+vault_id,{}).get('old',[])
                 self.db.execute('INSERT INTO local_metadata VALUES(?,?) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload',('vault-headers:'+vault_id,_json({'old':list(dict.fromkeys(pending+renamed))})))
-            return {'migrated':migrated,'renamed':renamed,'unclaimed':unclaimed}
+            return {'migrated':migrated,'renamed':renamed,'unclaimed':unclaimed,'backup':backup}
+
+    def _namespace_in_use(self, namespace):
+        prefix='vault:'+namespace
+        if self.db.execute('SELECT 1 FROM sources WHERE id>=? AND id<? LIMIT 1',(prefix+':',prefix+';')).fetchone():
+            return True
+        return self.db.execute("SELECT 1 FROM obligations WHERE instr(canonical,?)>0 LIMIT 1",(prefix+':',)).fetchone() is not None
 
     def pending_header_renames(self, vault_id):
         """Old namespaces whose ids may still be in this vault's Inbox note headers."""

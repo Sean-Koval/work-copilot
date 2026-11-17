@@ -258,6 +258,7 @@ def _namespace(store, root: Path, moved_from=None) -> dict:
             olds.append(earlier)
     adopted = store.adopt_vault(vault_id, str(root), olds, expected_root=known, present=lambda: _note_paths(root))
     result['migrated'] = adopted['migrated']
+    result['backup'] = adopted.get('backup')
     if adopted.get('unclaimed'):
         result['note'] = (f'This folder had a different vault id ({adopted["unclaimed"]}) whose notes are mostly not here, '
                           'so they were left under that id. If this is the same vault, capture it with --moved-from <this folder>.')
@@ -411,6 +412,8 @@ def _capture_vault_unlocked(store, root, moved_from=None) -> dict:
     report = {'captured': len(items), 'errors': errors, 'root': str(root), 'vault_id': vault['vault_id'], 'namespace': namespace, 'result': result}
     if vault.get('migrated'):
         report['migrated_note_ids'] = vault['migrated']
+    if vault.get('backup'):
+        report['backup_before_rename'] = vault['backup']
     if vault.get('rewritten_headers'):
         report['rewritten_note_headers'] = vault['rewritten_headers']
     if vault.get('note'):

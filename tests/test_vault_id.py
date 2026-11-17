@@ -314,3 +314,23 @@ def test_a_failed_header_rewrite_is_retried_and_spares_hand_written_inbox_notes(
     assert f'vault:{report["vault_id"]}:Inbox/standup.md' in (root / 'Inbox' / 'standup.md').read_text(encoding='utf-8')
     assert (root / 'Inbox' / 'mine.md').read_text(encoding='utf-8') == quoting
     assert 'rewritten_note_headers' not in capture_vault(store, root)
+
+
+def test_the_first_rename_backs_up_the_database_first(setup, monkeypatch):
+    from work_copilot import schema
+    tmp_path, root, store = setup
+    legacy = _legacy_capture(monkeypatch, store, root)
+    before = _state(store)
+    report = capture_vault(store, root)
+    assert report['migrated_note_ids'] == 2
+    backup = Path(report['backup_before_rename'])
+    # Named so prune_backups and doctor count it with the schema backups.
+    assert backup in schema.backups(tmp_path / 'copilot.db') and 'vault-id' in backup.name
+    copy = Store(backup)
+    try:
+        assert _state(copy) == before and all(sid.startswith(f'vault:{legacy}:') for sid, _ in _state(copy)[0])
+    finally:
+        copy.close()
+    # Nothing left to rename: no second backup.
+    assert 'backup_before_rename' not in capture_vault(store, root)
+    assert schema.backups(tmp_path / 'copilot.db') == [backup]
