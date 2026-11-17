@@ -13,6 +13,7 @@ import html
 import json
 import os
 import re
+import sys
 import threading
 from filelock import FileLock
 from pathlib import Path
@@ -114,27 +115,70 @@ def _read_vault_id(root: Path):
     return value
 
 
+class _ReadOnlyVault(OSError):
+    """The id file's temporary copy could not be created: the folder is not writable."""
+
+
+def _fsync_folder(folder: Path):
+    if os.name != 'posix':
+        return
+    try:
+        fd = os.open(folder, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def _durable(handle):
+    handle.flush()
+    os.fsync(handle.fileno())
+    if sys.platform == 'darwin':  # fsync alone does not reach the disk on macOS
+        import fcntl
+        try:
+            fcntl.fcntl(handle.fileno(), fcntl.F_FULLFSYNC)
+        except OSError:
+            pass
+
+
 def _write_vault_id(root: Path) -> str:
     """Create the id file whole or not at all: write a temporary file, then link it into place.
 
     Linking fails if another process created the file first (FileExistsError), so two first
-    captures can never leave a half-written or second id.
+    captures can never leave a half-written or second id. Where the filesystem has no hard
+    links (FAT, exFAT, some network and cloud mounts), the file is created exclusively instead;
+    the vault lock already keeps two captures in one store from racing.
     """
     import uuid
     value = uuid.uuid4().hex
     content = (json.dumps({'vault_id': value, 'note': 'Work Copilot names this folder by this id. Keep it when moving or syncing the folder.'}, indent=2) + '\n').encode('utf-8')
+    target = root / VAULT_ID_FILE
     temporary = root / f'.{VAULT_ID_FILE}.{uuid.uuid4().hex}.tmp'
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_BINARY', 0)
-    fd = os.open(temporary, flags, 0o644)
+    try:
+        fd = os.open(temporary, flags, 0o644)
+    except OSError as exc:
+        raise _ReadOnlyVault(exc.errno, exc.strerror) from exc
     try:
         with os.fdopen(fd, 'wb') as handle:
             handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        if os.name == 'posix':
-            os.link(temporary, root / VAULT_ID_FILE)
-        else:
-            os.rename(temporary, root / VAULT_ID_FILE)  # Windows: fails if the file exists
+            _durable(handle)
+        try:
+            if os.name == 'posix':
+                os.link(temporary, target)
+            else:
+                os.rename(temporary, target)  # Windows: fails if the file exists
+        except FileExistsError:
+            raise
+        except OSError:
+            with os.fdopen(os.open(target, flags, 0o644), 'wb') as handle:
+                handle.write(content)
+                _durable(handle)
+        _fsync_folder(root)
     finally:
         try:
             temporary.unlink()
@@ -155,7 +199,7 @@ def _vault_identity(root: Path):
             vault_id = _write_vault_id(root)
         except FileExistsError:
             vault_id = _read_vault_id(root)
-        except OSError as exc:
+        except _ReadOnlyVault as exc:
             if exc.errno not in _READ_ONLY:
                 raise
             return _legacy_namespace(root), None, f'Could not write {VAULT_ID_FILE} in the vault ({exc.strerror or exc}); note ids still depend on the folder path.'
@@ -164,7 +208,8 @@ def _vault_identity(root: Path):
 
 def _vault_namespace(root: Path) -> str:
     """The vault's id in source ids (``vault:<namespace>:<path>``): the one place it is made,
-    so a scan and a captured note's record header always agree. ``root`` must be resolved."""
+    so a scan and a captured note's record header always agree. ``root`` must be resolved.
+    Writes the id file when the vault has none yet."""
     return _vault_identity(root)[0]
 
 
@@ -204,15 +249,31 @@ def _namespace(store, root: Path, moved_from=None) -> dict:
                 raise ValueError(f'This folder and {known} have the same {VAULT_ID_FILE}, so one is a copy of the other. '
                                  f'Work Copilot keeps capturing {known}. To capture this folder as a separate vault, '
                                  f'delete {VAULT_ID_FILE} in it and capture again.')
-    olds = [_legacy_namespace(root)] + ([_legacy_namespace(_old_root(moved_from))] if moved_from else [])
-    adopted = store.adopt_vault(vault_id, str(root), olds, expected_root=known)
+    olds = [_legacy_namespace(root)]
+    if moved_from:
+        old_root = _old_root(moved_from)
+        olds.append(_legacy_namespace(old_root))
+        earlier = store.vault_at(str(old_root))
+        if earlier and earlier != vault_id:
+            olds.append(earlier)
+    adopted = store.adopt_vault(vault_id, str(root), olds, expected_root=known, present=lambda: _note_paths(root))
     result['migrated'] = adopted['migrated']
-    if adopted['renamed']:
+    if adopted.get('unclaimed'):
+        result['note'] = (f'This folder had a different vault id ({adopted["unclaimed"]}) whose notes are mostly not here, '
+                          'so they were left under that id. If this is the same vault, capture it with --moved-from <this folder>.')
+    pending = store.pending_header_renames(vault_id)
+    if pending:
         try:
-            result['rewritten_headers'] = _rewrite_note_headers(root, adopted['renamed'], vault_id)
+            result['rewritten_headers'] = _rewrite_note_headers(root, pending, vault_id)
+            store.clear_header_renames(vault_id, pending)
         except OSError as exc:
-            result['note'] = f'Could not update the ids in Inbox note headers ({exc.strerror or exc}).'
+            result['note'] = f'Could not update the ids in Inbox note headers ({exc.strerror or exc}); the next capture tries again.'
     return result
+
+
+def _note_paths(root: Path) -> set:
+    """Relative paths of the vault's Markdown notes, as note ids spell them."""
+    return {path.relative_to(root).as_posix() for path in root.rglob('*.md') if GENERATED_DIR not in path.relative_to(root).parts}
 
 
 def _record_id(source_id: str) -> str:
@@ -220,14 +281,15 @@ def _record_id(source_id: str) -> str:
     return 'vault-' + hashlib.sha256(source_id.encode()).hexdigest()[:16]
 
 
-_FRONTMATTER = re.compile(r'\A---\r?\n.*?\r?\n---\r?\n', re.S)
+_FRONTMATTER = re.compile(r'\A\ufeff?---\r?\n(?:.*?\r?\n)?---\r?\n', re.S)
 
 
 def _rewrite_note_headers(root: Path, old_namespaces, namespace: str) -> int:
     """Rename source and record ids in the headers of notes capture_note wrote to Inbox/.
 
-    Only the frontmatter changes, and only ids under an old namespace, which no
-    hand-written note carries. The note body and every other note stay as written.
+    Only notes whose header ``id:`` is the record id of their own old source id are
+    changed, so a hand-written note that quotes an old id stays as written. Only the
+    frontmatter changes; the note body keeps its bytes.
     """
     inbox = root / 'Inbox'
     if inbox.is_symlink() or not inbox.is_dir():
@@ -245,17 +307,24 @@ def _rewrite_note_headers(root: Path, old_namespaces, namespace: str) -> int:
             continue
         head = new_head = match.group(0)
         for old in old_namespaces:
-            for source_id in set(re.findall(rf'vault:{old}:[^\s"\',\]}}]+', head)):
-                renamed = f'vault:{namespace}:' + source_id[len(f'vault:{old}:'):]
-                new_head = new_head.replace(source_id, renamed).replace(_record_id(source_id), _record_id(renamed))
+            source_id = f'vault:{old}:Inbox/{path.name}'
+            if not re.search(rf'^id:[ \t]*["\']?{_record_id(source_id)}["\']?[ \t]*\r?$', head, re.M):
+                continue
+            renamed = f'vault:{namespace}:Inbox/{path.name}'
+            new_head = new_head.replace(source_id, renamed).replace(_record_id(source_id), _record_id(renamed))
         if new_head == head:
             continue
         temporary = path.with_name(f'.{path.name}.{os.getpid()}.tmp')
-        with temporary.open('xb') as handle:
-            handle.write((new_head + text[len(head):]).encode('utf-8'))
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        try:
+            with temporary.open('xb') as handle:
+                handle.write((new_head + text[len(head):]).encode('utf-8'))
+                _durable(handle)
+            os.replace(temporary, path)
+        finally:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
         rewritten += 1
     return rewritten
 

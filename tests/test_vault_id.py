@@ -1,5 +1,7 @@
 """KAN-391: a vault keeps its note ids and evidence links when its folder moves."""
+import errno
 import json
+import os
 import shutil
 import sqlite3
 from pathlib import Path
@@ -65,7 +67,7 @@ def test_moving_the_vault_keeps_notes_and_evidence(setup):
 def _legacy_capture(monkeypatch, store, root):
     """Capture as before KAN-391: no id file, ids namespaced by the path hash."""
     with monkeypatch.context() as patch:
-        patch.setattr(vault_module, '_write_vault_id', lambda root: (_ for _ in ()).throw(PermissionError(13, 'Permission denied')))
+        patch.setattr(vault_module, '_write_vault_id', lambda root: (_ for _ in ()).throw(vault_module._ReadOnlyVault(13, 'Permission denied')))
         report = capture_vault(store, root)
     assert report['vault_id'] is None and 'note' in report
     assert not (root / VAULT_ID_FILE).exists()
@@ -155,7 +157,8 @@ def test_a_rewritten_id_file_keeps_the_notes(setup):
 def test_the_same_folder_under_another_spelling_is_not_a_copy(setup):
     _, root, store = setup
     vault_id = capture_vault(store, root)['vault_id']
-    spelled = str(root.parent / '.' / root.name)
+    spelled = os.path.join(str(root.parent), '.', root.name)
+    assert spelled != str(root)
     store.db.execute("UPDATE local_metadata SET payload=? WHERE key=?", (json.dumps({'root': spelled}), 'vault-root:' + vault_id))
     store.db.commit()
     assert capture_vault(store, root)['vault_id'] == vault_id
@@ -173,18 +176,29 @@ def test_a_vault_moved_before_it_had_an_id_is_renamed_with_moved_from(setup, mon
     assert sources == sorted((sid.replace(legacy, report['vault_id']), deleted) for sid, deleted in old_sources)
 
 
-def test_notes_under_both_namespaces_merge_keeping_the_new_rows(setup, monkeypatch):
+def test_notes_under_both_namespaces_merge_keeping_the_reviewed_obligation(setup, monkeypatch):
     tmp_path, root, store = setup
-    _legacy_capture(monkeypatch, store, root)
+    legacy = _legacy_capture(monkeypatch, store, root)
+    old_note = f'vault:{legacy}:loose.md'
+    reviewed = store.track_obligation({'intent_key': f'map:{old_note}', 'title': 'Map the loose note', 'project_id': 'atlas', 'evidence_ids': [old_note]})
+    reviewed = store.review(reviewed['id'], reviewed['revision'], {'status': 'waiting', 'waiting_on': 'Priya'})
     with monkeypatch.context() as patch:
         patch.setattr(Store, '_rename_vault_namespace', lambda self, old, new: 0)
         vault_id = capture_vault(store, root)['vault_id']
-    assert len(store.list_sources()) == 4
+    new_note = f'vault:{vault_id}:loose.md'
+    fresh = store.track_obligation({'intent_key': f'map:{new_note}', 'title': 'Map the loose note', 'project_id': 'atlas', 'evidence_ids': [new_note]})
+    store.draft(fresh['id'])
+    assert len(store.list_sources(provider='vault')) == 4
     capture_vault(store, root, moved_from=root)
-    sources, obligations = _state(store)
+    sources = [(s['id'], s['deleted']) for s in store.list_sources(provider='vault')]
     assert all(sid.startswith(f'vault:{vault_id}:') and not deleted for sid, deleted in sources) and len(sources) == 2
-    assert len([o for o in obligations if o[1] == 'confirm-release']) == 1
-    assert all(e.startswith(f'vault:{vault_id}:') for o in obligations for e in o[2])
+    # capture's own review candidate (no project) merged the same way; one of each remains.
+    assert sorted(o['project_id'] or '' for o in store.snapshot()['obligations'] if o['intent_key'] == f'map:{new_note}') == ['', 'atlas']
+    mapped = [o for o in store.snapshot()['obligations'] if o['intent_key'] == f'map:{new_note}' and o['project_id'] == 'atlas']
+    assert len(mapped) == 1 and mapped[0]['id'] == reviewed['id'] and mapped[0]['waiting_on'] == 'Priya'
+    assert [e['id'] for e in mapped[0]['evidence'] if e['id'].startswith('vault:')] == [new_note]
+    assert store.draft(reviewed['id'])  # the fresh obligation's draft moved; snapshot and drafts still work
+    assert all(e.startswith(f'vault:{vault_id}:') for o in _state(store)[1] for e in o[2] if e.startswith('vault:'))
 
 
 def test_only_a_read_only_folder_falls_back_to_the_path_hash(setup, monkeypatch):
@@ -229,3 +243,74 @@ def test_migration_rewrites_ids_in_inbox_note_headers(setup, monkeypatch):
     assert text == f'---\nid: {vault_module._record_id(new_id)}\nsources:\n  - id: "{new_id}"\n---\n' + body
     assert old_id in (root / 'Meetings' / 'hand.md').read_text(encoding='utf-8')
     assert not [p for p in (root / 'Inbox').iterdir() if p.name.endswith('.tmp')]
+
+
+def test_a_filesystem_without_hard_links_still_gets_an_id_file(setup, monkeypatch):
+    _, root, store = setup
+    monkeypatch.setattr(os, 'link', lambda *args: (_ for _ in ()).throw(OSError(errno.EPERM, 'Operation not permitted')))
+    report = capture_vault(store, root)
+    assert report['vault_id'] == json.loads((root / VAULT_ID_FILE).read_text(encoding='utf-8'))['vault_id']
+    assert not [p for p in root.iterdir() if p.name.endswith('.tmp')]
+
+
+def test_a_racing_first_capture_uses_the_id_written_first(setup, monkeypatch):
+    _, root, store = setup
+    winner = '0' * 32
+    real = vault_module._write_vault_id
+
+    def racing(folder):
+        (folder / VAULT_ID_FILE).write_text(json.dumps({'vault_id': winner}), encoding='utf-8')
+        return real(folder)
+    monkeypatch.setattr(vault_module, '_write_vault_id', racing)
+    assert capture_vault(store, root)['vault_id'] == winner
+
+
+def test_an_unwritable_folder_keeps_the_path_hash(setup, monkeypatch):
+    _, root, store = setup
+    monkeypatch.setattr(vault_module, '_write_vault_id', lambda root: (_ for _ in ()).throw(vault_module._ReadOnlyVault(errno.EROFS, 'Read-only file system')))
+    report = capture_vault(store, root)
+    assert report['vault_id'] is None and report['namespace'] == vault_module._legacy_namespace(root) and 'Read-only' in report['note']
+
+
+def test_a_new_vault_in_an_old_vaults_folder_does_not_take_its_notes(setup, tmp_path):
+    _, root, store = setup
+    first = capture_vault(store, root)['vault_id']
+    moved = _move(root, tmp_path)
+    (root / 'other').mkdir(parents=True)
+    (root / 'other' / 'new.md').write_text('# New vault\n', encoding='utf-8')
+    report = capture_vault(store, root)
+    assert report['vault_id'] != first and 'migrated_note_ids' not in report and first in report['note']
+    assert capture_vault(store, moved)['vault_id'] == first
+    assert not [s for s in store.list_sources() if s['id'].startswith(f'vault:{first}:') and s['deleted']]
+
+
+def test_moved_from_renames_a_vault_whose_id_file_was_lost(setup, tmp_path):
+    _, root, store = setup
+    first = capture_vault(store, root)['vault_id']
+    before = _state(store)
+    moved = _move(root, tmp_path)
+    (moved / VAULT_ID_FILE).unlink()
+    report = capture_vault(store, moved, moved_from=root)
+    assert report['migrated_note_ids'] == 2
+    assert _state(store)[0] == sorted((sid.replace(first, report['vault_id']), deleted) for sid, deleted in before[0])
+
+
+def test_a_failed_header_rewrite_is_retried_and_spares_hand_written_inbox_notes(setup, monkeypatch):
+    _, root, store = setup
+    legacy = vault_module._legacy_namespace(root)
+    (root / 'Inbox').mkdir()
+    own = f'vault:{legacy}:Inbox/standup.md'
+    (root / 'Inbox' / 'standup.md').write_text(f'---\nid: {vault_module._record_id(own)}\nsource: "{own}"\n---\nBody\n', encoding='utf-8')
+    quoting = f'---\nsee: "{own}"\n---\nHand-written.\n'
+    (root / 'Inbox' / 'mine.md').write_text(quoting, encoding='utf-8')
+    _legacy_capture(monkeypatch, store, root)
+    with monkeypatch.context() as patch:
+        patch.setattr(vault_module.os, 'replace', lambda *a: (_ for _ in ()).throw(PermissionError(13, 'locked')))
+        report = capture_vault(store, root)
+    assert 'next capture tries again' in report['note']
+    assert not [p for p in (root / 'Inbox').iterdir() if p.name.endswith('.tmp')]
+    report = capture_vault(store, root)
+    assert report['rewritten_note_headers'] == 1
+    assert f'vault:{report["vault_id"]}:Inbox/standup.md' in (root / 'Inbox' / 'standup.md').read_text(encoding='utf-8')
+    assert (root / 'Inbox' / 'mine.md').read_text(encoding='utf-8') == quoting
+    assert 'rewritten_note_headers' not in capture_vault(store, root)

@@ -843,24 +843,33 @@ class Store:
         row=self.db.execute('SELECT payload FROM local_metadata WHERE key=?',(key,)).fetchone()
         return json.loads(row[0]) if row else default
 
-    def adopt_vault(self, vault_id, root, old_namespaces=(), expected_root=None):
+    def adopt_vault(self, vault_id, root, old_namespaces=(), expected_root=None, present=None):
         """Record where the vault lives, and rename notes captured under its earlier namespaces (KAN-391).
 
-        ``old_namespaces`` are path hashes from before stable ids (the current folder, and an
-        old folder the user named). A different id recorded at the same folder, whose vault was
-        not seen anywhere else since, is renamed too: its id file was deleted and rewritten.
+        ``old_namespaces`` are earlier namespaces of this same vault: path hashes from before
+        stable ids, or the id at a folder the user named with --moved-from. A different id
+        recorded at this folder (its id file was deleted and rewritten) is renamed too, but
+        only when ``present()`` (the folder's notes, by relative path) holds at least half of
+        that id's notes; otherwise the folder may hold a different vault, and it is reported.
         ``expected_root`` is where the caller found the vault recorded; if another capture
         changed that meanwhile, nothing is changed and ValueError asks for a new capture.
         """
-        if not re.fullmatch(r'[0-9a-f]{32}',vault_id) or not all(re.fullmatch(r'[0-9a-f]{20}',old) for old in old_namespaces):
+        if not re.fullmatch(r'[0-9a-f]{32}',vault_id) or not all(re.fullmatch(r'[0-9a-f]{20}|[0-9a-f]{32}',old) for old in old_namespaces):
             raise ValueError('Invalid vault namespace')
         with self._transaction():
             if self._metadata('vault-root:'+vault_id,{}).get('root')!=expected_root:
                 raise ValueError('Another capture of this vault ran at the same time; capture again')
             olds=list(dict.fromkeys(old for old in old_namespaces if old!=vault_id))
             previous=self._metadata('vault-at:'+root,{}).get('vault_id')
-            if previous and previous!=vault_id and self._metadata('vault-root:'+previous,{}).get('root')==root:
-                olds.append(previous)
+            unclaimed=None
+            if previous and previous!=vault_id and previous not in olds and self._metadata('vault-root:'+previous,{}).get('root')==root:
+                prefix='vault:'+previous+':'
+                paths=[row[0][len(prefix):] for row in self.db.execute("SELECT id FROM sources WHERE id>=? AND id<? AND json_extract(payload,'$.deleted')=0",(prefix,'vault:'+previous+';'))]
+                found=present() if present and paths else set()
+                if paths and sum(path in found for path in paths)*2>=len(paths):
+                    olds.append(previous)
+                elif paths:
+                    unclaimed=previous
             migrated=0; renamed=[]
             for old in olds:
                 count=self._rename_vault_namespace(old,vault_id)
@@ -870,9 +879,45 @@ class Store:
                 self._rebuild_all_projections()
             for key,payload in (('vault-root:'+vault_id,{'root':root}),('vault-at:'+root,{'vault_id':vault_id})):
                 self.db.execute('INSERT INTO local_metadata VALUES(?,?) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload',(key,_json(payload)))
-            if previous and previous!=vault_id and previous in renamed:
-                self.db.execute('DELETE FROM local_metadata WHERE key=?',('vault-root:'+previous,))
-            return {'migrated':migrated,'renamed':renamed}
+            for old in renamed:
+                if re.fullmatch(r'[0-9a-f]{32}',old):
+                    self.db.execute('DELETE FROM local_metadata WHERE key=?',('vault-root:'+old,))
+            if renamed:
+                # Inbox note headers still carry the old ids until the vault rewrites them.
+                pending=self._metadata('vault-headers:'+vault_id,{}).get('old',[])
+                self.db.execute('INSERT INTO local_metadata VALUES(?,?) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload',('vault-headers:'+vault_id,_json({'old':list(dict.fromkeys(pending+renamed))})))
+            return {'migrated':migrated,'renamed':renamed,'unclaimed':unclaimed}
+
+    def pending_header_renames(self, vault_id):
+        """Old namespaces whose ids may still be in this vault's Inbox note headers."""
+        with self._lock:
+            return self._metadata('vault-headers:'+vault_id,{}).get('old',[])
+
+    def clear_header_renames(self, vault_id, done):
+        with self._transaction():
+            left=[old for old in self._metadata('vault-headers:'+vault_id,{}).get('old',[]) if old not in done]
+            if left:
+                self.db.execute('UPDATE local_metadata SET payload=? WHERE key=?',(_json({'old':left}),'vault-headers:'+vault_id))
+            else:
+                self.db.execute('DELETE FROM local_metadata WHERE key=?',('vault-headers:'+vault_id,))
+
+    def _merge_obligation(self, loser, winner):
+        """Move ``loser``'s links, draft and plan entries to ``winner``, then delete ``loser``."""
+        for link in ('source_intents','manual_evidence','evidence'):
+            self.db.execute(f'UPDATE OR IGNORE {link} SET obligation_id=? WHERE obligation_id=?',(winner,loser))
+            self.db.execute(f'DELETE FROM {link} WHERE obligation_id=?',(loser,))
+        row=self.db.execute('SELECT payload FROM drafts WHERE id=?',('draft-'+loser,)).fetchone()
+        if row:
+            self.db.execute('DELETE FROM drafts WHERE id=?',('draft-'+loser,))
+            if not self.db.execute('SELECT 1 FROM drafts WHERE id=?',('draft-'+winner,)).fetchone():
+                draft=json.loads(row[0]); draft.update(id='draft-'+winner,obligation_id=winner,stale=True)
+                self.db.execute('INSERT INTO drafts VALUES(?,?)',(draft['id'],_json(draft)))
+        for day,payload in self.db.execute('SELECT day,payload FROM plans').fetchall():
+            plan=json.loads(payload)
+            if loser in plan.get('priorities',[]):
+                plan['priorities']=list(dict.fromkeys(winner if oid==loser else oid for oid in plan['priorities']))
+                self.db.execute('UPDATE plans SET payload=? WHERE day=?',(_json(plan),day))
+        self.db.execute('DELETE FROM obligations WHERE id=?',(loser,))
 
     # Values under these keys are text from notes and messages, never ids, so they are left as written.
     _FREE_TEXT_KEYS=frozenset({'body','title','text','note','summary','excerpt','content','correction','review_reason'})
@@ -930,13 +975,16 @@ class Store:
                 except sqlite3.IntegrityError:
                     if table!='obligations':
                         raise
-                    # Same project and intent already tracked under the new name: keep that one.
-                    kept=self.db.execute('SELECT id FROM obligations WHERE canonical=?',(updated[names.index('canonical')],)).fetchone()[0]
-                    gone=values[names.index('id')]
-                    for link in ('source_intents','manual_evidence','evidence'):
-                        self.db.execute(f'UPDATE OR IGNORE {link} SET obligation_id=? WHERE obligation_id=?',(kept,gone))
-                        self.db.execute(f'DELETE FROM {link} WHERE obligation_id=?',(gone,))
-                    self.db.execute('DELETE FROM obligations WHERE id=?',(gone,))
+                    # Same project and intent tracked under both names: keep the reviewed one,
+                    # else the more revised one, else the newer one; move the other's links to it.
+                    other,payload=self.db.execute('SELECT id,payload FROM obligations WHERE canonical=?',(updated[names.index('canonical')],)).fetchone()
+                    mine=values[names.index('id')]
+                    rank=lambda ob:(bool(ob.get('reviewed')),ob.get('revision',1))
+                    if rank(json.loads(updated[names.index('payload')]))>rank(json.loads(payload)):
+                        self._merge_obligation(other,mine)
+                        self.db.execute(f'UPDATE {table} SET '+','.join(f'{name}=?' for name in names)+' WHERE rowid=?',[*updated,rowid])
+                    else:
+                        self._merge_obligation(mine,other)
         return count
 
     def rebuild_projections(self):
