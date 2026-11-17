@@ -832,31 +832,112 @@ class Store:
     def vault_root(self, vault_id):
         """The folder this store last captured the vault ``vault_id`` from, or None."""
         with self._lock:
-            row=self.db.execute('SELECT payload FROM local_metadata WHERE key=?',('vault-root:'+vault_id,)).fetchone()
-            return json.loads(row[0])['root'] if row else None
+            return self._metadata('vault-root:'+vault_id,{}).get('root')
 
-    def adopt_vault(self, vault_id, root, legacy_namespace):
-        """Record where the vault lives, and once rename notes from its old path-hash namespace (KAN-391).
+    def vault_at(self, root):
+        """The vault id this store last captured at ``root``, or None."""
+        with self._lock:
+            return self._metadata('vault-at:'+str(root),{}).get('vault_id')
 
-        Old ids are ``vault:<legacy>:<path>`` and the connector is ``vault:<legacy>``. Every
-        recorded copy of that token, in ids, payloads, obligation keys and evidence links, is
-        rewritten to ``vault:<vault_id>`` in one transaction, then search and project links
-        are rebuilt. The token is 20 hex digits of a hash, so it matches nothing else.
+    def _metadata(self, key, default):
+        row=self.db.execute('SELECT payload FROM local_metadata WHERE key=?',(key,)).fetchone()
+        return json.loads(row[0]) if row else default
+
+    def adopt_vault(self, vault_id, root, old_namespaces=(), expected_root=None):
+        """Record where the vault lives, and rename notes captured under its earlier namespaces (KAN-391).
+
+        ``old_namespaces`` are path hashes from before stable ids (the current folder, and an
+        old folder the user named). A different id recorded at the same folder, whose vault was
+        not seen anywhere else since, is renamed too: its id file was deleted and rewritten.
+        ``expected_root`` is where the caller found the vault recorded; if another capture
+        changed that meanwhile, nothing is changed and ValueError asks for a new capture.
         """
-        if not re.fullmatch(r'[0-9a-f]{32}',vault_id) or not re.fullmatch(r'[0-9a-f]{20}',legacy_namespace):
+        if not re.fullmatch(r'[0-9a-f]{32}',vault_id) or not all(re.fullmatch(r'[0-9a-f]{20}',old) for old in old_namespaces):
             raise ValueError('Invalid vault namespace')
-        old,new='vault:'+legacy_namespace,'vault:'+vault_id
         with self._transaction():
-            migrated=self.db.execute("SELECT count(*) FROM sources WHERE id LIKE ?",(old+':%',)).fetchone()[0]
+            if self._metadata('vault-root:'+vault_id,{}).get('root')!=expected_root:
+                raise ValueError('Another capture of this vault ran at the same time; capture again')
+            olds=list(dict.fromkeys(old for old in old_namespaces if old!=vault_id))
+            previous=self._metadata('vault-at:'+root,{}).get('vault_id')
+            if previous and previous!=vault_id and self._metadata('vault-root:'+previous,{}).get('root')==root:
+                olds.append(previous)
+            migrated=0; renamed=[]
+            for old in olds:
+                count=self._rename_vault_namespace(old,vault_id)
+                if count:
+                    migrated+=count; renamed.append(old)
             if migrated:
-                if self.db.execute("SELECT 1 FROM sources WHERE id LIKE ? LIMIT 1",(new+':%',)).fetchone():
-                    raise ValueError('This vault has notes under both its old and its new id; run doctor and capture again')
-                for table in schema.STATE_TABLES:
-                    for column in [row[1] for row in self.db.execute(f'PRAGMA table_info({table})') if row[2].upper()=='TEXT']:
-                        self.db.execute(f'UPDATE {table} SET {column}=replace({column},?,?) WHERE instr({column},?)>0',(old,new,old))
                 self._rebuild_all_projections()
-            self.db.execute('INSERT INTO local_metadata VALUES(?,?) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload',('vault-root:'+vault_id,_json({'root':root})))
-            return {'migrated':migrated}
+            for key,payload in (('vault-root:'+vault_id,{'root':root}),('vault-at:'+root,{'vault_id':vault_id})):
+                self.db.execute('INSERT INTO local_metadata VALUES(?,?) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload',(key,_json(payload)))
+            if previous and previous!=vault_id and previous in renamed:
+                self.db.execute('DELETE FROM local_metadata WHERE key=?',('vault-root:'+previous,))
+            return {'migrated':migrated,'renamed':renamed}
+
+    # Values under these keys are text from notes and messages, never ids, so they are left as written.
+    _FREE_TEXT_KEYS=frozenset({'body','title','text','note','summary','excerpt','content','correction','review_reason'})
+
+    def _rename_vault_namespace(self, old, new):
+        """Rewrite ids ``vault:<old>[:...]`` (also behind a ``map:``-style prefix) to ``vault:<new>``.
+
+        Only whole id values change: columns, JSON values and JSON keys outside free text.
+        A renamed row whose key already exists under the new name is dropped, keeping the
+        newer row; a dropped obligation's links move to the one kept. Returns the number of
+        notes renamed.
+        """
+        low,high='vault:'+old+':','vault:'+old+';'
+        count=self.db.execute('SELECT count(*) FROM sources WHERE id>=? AND id<?',(low,high)).fetchone()[0]
+        if not count and not self.db.execute('SELECT 1 FROM connectors WHERE name=?',('vault:'+old,)).fetchone():
+            return 0
+        pattern=re.compile(r'^((?:[a-z][a-z0-9-]*:)?)vault:'+old+r'(?=:|$)')
+        def rename_text(value):
+            return pattern.sub(lambda m:m.group(1)+'vault:'+new,value,count=1)
+        def rename(value):
+            if isinstance(value,str):
+                return rename_text(value)
+            if isinstance(value,list):
+                return [rename(item) for item in value]
+            if isinstance(value,dict):
+                return {rename_text(key):(item if key in self._FREE_TEXT_KEYS else rename(item)) for key,item in value.items()}
+            return value
+        def column(value):
+            if not isinstance(value,str) or 'vault:'+old not in value:
+                return value
+            if value[:1] in '[{':
+                try:
+                    parsed=json.loads(value)
+                except ValueError:
+                    return value
+                changed=rename(parsed)
+                return _json(changed) if changed!=parsed else value
+            return rename_text(value)
+        for table in schema.STATE_TABLES:
+            info=list(self.db.execute(f'PRAGMA table_info({table})'))
+            names=[row[1] for row in info]
+            keys=[row[1] for row in sorted(info,key=lambda row:row[5]) if row[5]]
+            where=' OR '.join(f'instr({name},?)>0' for name in names)
+            for row in self.db.execute(f'SELECT rowid,* FROM {table} WHERE {where}',['vault:'+old]*len(names)).fetchall():
+                rowid,values=row[0],list(row[1:])
+                updated=[column(value) for value in values]
+                if updated==values:
+                    continue
+                old_key=[values[names.index(k)] for k in keys]; new_key=[updated[names.index(k)] for k in keys]
+                if keys and new_key!=old_key and self.db.execute(f'SELECT 1 FROM {table} WHERE '+' AND '.join(f'{k}=?' for k in keys),new_key).fetchone():
+                    self.db.execute(f'DELETE FROM {table} WHERE rowid=?',(rowid,))
+                    continue
+                try:
+                    self.db.execute(f'UPDATE {table} SET '+','.join(f'{name}=?' for name in names)+' WHERE rowid=?',[*updated,rowid])
+                except sqlite3.IntegrityError:
+                    if table!='obligations':
+                        raise
+                    # Same project and intent already tracked under the new name: keep that one.
+                    kept=self.db.execute('SELECT id FROM obligations WHERE canonical=?',(updated[names.index('canonical')],)).fetchone()[0]
+                    gone=values[names.index('id')]
+                    for link in ('source_intents','manual_evidence','evidence'):
+                        self.db.execute(f'UPDATE OR IGNORE {link} SET obligation_id=? WHERE obligation_id=?',(kept,gone))
+                        self.db.execute(f'DELETE FROM {link} WHERE obligation_id=?',(gone,))
+                    self.db.execute('DELETE FROM obligations WHERE id=?',(gone,))
+        return count
 
     def rebuild_projections(self):
         """Explicit repair: rebuild the search index and project links. Recorded state is untouched."""

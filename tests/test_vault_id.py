@@ -102,7 +102,7 @@ def test_a_copied_vault_is_refused_until_its_id_file_is_removed(setup):
     capture_vault(store, root)
     copy = tmp_path / 'copy'
     shutil.copytree(root, copy)
-    with pytest.raises(ValueError, match='same id'):
+    with pytest.raises(ValueError, match='copy of the other'):
         capture_vault(store, copy)
     (copy / VAULT_ID_FILE).unlink()
     report = capture_vault(store, copy)
@@ -126,3 +126,106 @@ def test_inbox_note_uses_the_stable_namespace(setup):
     vault_id = json.loads((root / VAULT_ID_FILE).read_text(encoding='utf-8'))['vault_id']
     assert result['source_ids'][0].startswith(f'vault:{vault_id}:Inbox/')
     assert store.source(result['source_ids'][0])
+
+
+def test_migration_renames_ids_but_not_note_text(setup, monkeypatch):
+    tmp_path, root, store = setup
+    legacy = vault_module._legacy_namespace(root)
+    (root / 'quoted.md').write_text(f'# Quoted\nThe old id was vault:{legacy}:loose.md, kept as written.\n', encoding='utf-8')
+    _legacy_capture(monkeypatch, store, root)
+    vault_id = capture_vault(store, root)['vault_id']
+    body = store.source(f'vault:{vault_id}:quoted.md')['body']
+    assert f'vault:{legacy}:loose.md' in body
+    assert not [s for s in store.list_sources() if legacy in s['id']]
+
+
+def test_a_rewritten_id_file_keeps_the_notes(setup):
+    _, root, store = setup
+    capture_vault(store, root)
+    before = _state(store)
+    first = json.loads((root / VAULT_ID_FILE).read_text(encoding='utf-8'))['vault_id']
+    (root / VAULT_ID_FILE).unlink()
+    report = capture_vault(store, root)
+    assert report['vault_id'] != first and report['migrated_note_ids'] == 2
+    sources, obligations = _state(store)
+    assert sources == sorted((sid.replace(first, report['vault_id']), deleted) for sid, deleted in before[0])
+    assert [o[0] for o in obligations] == [o[0] for o in before[1]]
+
+
+def test_the_same_folder_under_another_spelling_is_not_a_copy(setup):
+    _, root, store = setup
+    vault_id = capture_vault(store, root)['vault_id']
+    spelled = str(root.parent / '.' / root.name)
+    store.db.execute("UPDATE local_metadata SET payload=? WHERE key=?", (json.dumps({'root': spelled}), 'vault-root:' + vault_id))
+    store.db.commit()
+    assert capture_vault(store, root)['vault_id'] == vault_id
+    assert store.vault_root(vault_id) == str(root)
+
+
+def test_a_vault_moved_before_it_had_an_id_is_renamed_with_moved_from(setup, monkeypatch):
+    tmp_path, root, store = setup
+    legacy = _legacy_capture(monkeypatch, store, root)
+    old_sources, _ = _state(store)
+    moved = _move(root, tmp_path)
+    report = capture_vault(store, moved, moved_from=root)
+    assert report['migrated_note_ids'] == 2
+    sources, _ = _state(store)
+    assert sources == sorted((sid.replace(legacy, report['vault_id']), deleted) for sid, deleted in old_sources)
+
+
+def test_notes_under_both_namespaces_merge_keeping_the_new_rows(setup, monkeypatch):
+    tmp_path, root, store = setup
+    _legacy_capture(monkeypatch, store, root)
+    with monkeypatch.context() as patch:
+        patch.setattr(Store, '_rename_vault_namespace', lambda self, old, new: 0)
+        vault_id = capture_vault(store, root)['vault_id']
+    assert len(store.list_sources()) == 4
+    capture_vault(store, root, moved_from=root)
+    sources, obligations = _state(store)
+    assert all(sid.startswith(f'vault:{vault_id}:') and not deleted for sid, deleted in sources) and len(sources) == 2
+    assert len([o for o in obligations if o[1] == 'confirm-release']) == 1
+    assert all(e.startswith(f'vault:{vault_id}:') for o in obligations for e in o[2])
+
+
+def test_only_a_read_only_folder_falls_back_to_the_path_hash(setup, monkeypatch):
+    import errno
+    _, root, store = setup
+    monkeypatch.setattr(vault_module, '_write_vault_id', lambda root: (_ for _ in ()).throw(OSError(errno.ENOSPC, 'No space left on device')))
+    with pytest.raises(OSError):
+        capture_vault(store, root)
+
+
+def test_the_id_file_is_written_whole(setup):
+    _, root, store = setup
+    capture_vault(store, root)
+    assert not [p.name for p in root.iterdir() if p.name.endswith('.tmp')]
+    assert json.loads((root / VAULT_ID_FILE).read_text(encoding='utf-8'))['vault_id']
+
+
+def test_a_damaged_id_file_names_the_recorded_id(setup):
+    _, root, store = setup
+    vault_id = capture_vault(store, root)['vault_id']
+    (root / VAULT_ID_FILE).write_text('garbage', encoding='utf-8')
+    with pytest.raises(ValueError, match=vault_id):
+        capture_vault(store, root)
+
+
+def test_migration_rewrites_ids_in_inbox_note_headers(setup, monkeypatch):
+    tmp_path, root, store = setup
+    legacy = vault_module._legacy_namespace(root)
+    old_id = f'vault:{legacy}:Inbox/standup.md'
+    record = vault_module._record_id(old_id)
+    (root / 'Inbox').mkdir()
+    header = f'---\nid: {record}\nsources:\n  - id: "{old_id}"\n---\n'
+    body = f'# Standup\nMentions {old_id} in the text.\n'
+    (root / 'Inbox' / 'standup.md').write_bytes((header + body).encode('utf-8'))
+    (root / 'Meetings' / 'hand.md').write_text(f'---\nsee: {old_id}\n---\nHand-written.\n', encoding='utf-8')
+    _legacy_capture(monkeypatch, store, root)
+    report = capture_vault(store, root)
+    vault_id = report['vault_id']
+    assert report['rewritten_note_headers'] == 1
+    new_id = f'vault:{vault_id}:Inbox/standup.md'
+    text = (root / 'Inbox' / 'standup.md').read_text(encoding='utf-8')
+    assert text == f'---\nid: {vault_module._record_id(new_id)}\nsources:\n  - id: "{new_id}"\n---\n' + body
+    assert old_id in (root / 'Meetings' / 'hand.md').read_text(encoding='utf-8')
+    assert not [p for p in (root / 'Inbox').iterdir() if p.name.endswith('.tmp')]
