@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from filelock import FileLock
 from .knowledge import ENVELOPE_VERSION, validate_envelope
+from . import schema
 
 
 class ConflictError(ValueError):
@@ -64,27 +65,10 @@ class Store:
         self.db.row_factory = sqlite3.Row
         self.db.execute('PRAGMA journal_mode=WAL')
         self.db.execute('PRAGMA foreign_keys=ON')
-        self.db.executescript('''
-        CREATE VIRTUAL TABLE IF NOT EXISTS source_search USING fts5(source_id UNINDEXED,title,body,project_terms);
-        CREATE TABLE IF NOT EXISTS sources(id TEXT PRIMARY KEY, revision TEXT NOT NULL, payload TEXT NOT NULL, connector TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS source_revisions(id TEXT NOT NULL,revision TEXT NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(id,revision));
-        CREATE TABLE IF NOT EXISTS source_mappings(source_id TEXT PRIMARY KEY,revision INTEGER NOT NULL,projects TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY,name TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS project_config(project_id TEXT PRIMARY KEY,aliases TEXT NOT NULL,rooms TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS source_projects(source_id TEXT NOT NULL,project_id TEXT NOT NULL,workstream TEXT NOT NULL DEFAULT '',PRIMARY KEY(source_id,project_id,workstream));
-        CREATE TABLE IF NOT EXISTS obligations(id TEXT PRIMARY KEY, canonical TEXT UNIQUE NOT NULL,payload TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS source_intents(source_id TEXT NOT NULL,candidate_key TEXT NOT NULL,obligation_id TEXT NOT NULL,PRIMARY KEY(source_id,candidate_key));
-        CREATE TABLE IF NOT EXISTS manual_evidence(obligation_id TEXT NOT NULL,source_id TEXT NOT NULL,PRIMARY KEY(obligation_id,source_id));
-        CREATE TABLE IF NOT EXISTS evidence(obligation_id TEXT NOT NULL,source_id TEXT NOT NULL,PRIMARY KEY(obligation_id,source_id));
-        CREATE TABLE IF NOT EXISTS drafts(id TEXT PRIMARY KEY,payload TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS connectors(name TEXT PRIMARY KEY,payload TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS local_metadata(key TEXT PRIMARY KEY,payload TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS plans(day TEXT PRIMARY KEY,payload TEXT NOT NULL);
-        ''')
-        # Serialize schema inspection and projection rebuild across UI/MCP startup.
+        # Ordered migrations, with a backup first when the database already holds data.
+        self.migration=schema.migrate(self.db,self.path)
+        # Serialize projection rebuild across UI/MCP startup.
         self.db.execute('BEGIN IMMEDIATE')
-        if 'revision' not in {row['name'] for row in self.db.execute('PRAGMA table_info(project_config)')}:
-            self.db.execute('ALTER TABLE project_config ADD COLUMN revision INTEGER NOT NULL DEFAULT 1')
         # Rebuildable projection; migration also indexes pre-search databases.
         self.db.execute('DELETE FROM source_search')
         self._rebuild_project_projections(invalidate_drafts=False)
@@ -129,6 +113,20 @@ class Store:
     def close(self):
         with self._lock:
             self.db.close()
+
+    def export_jsonl(self, destination):
+        """Write all recorded state as JSONL (one consistent snapshot); restore with import_jsonl."""
+        with self._transaction():
+            return schema.export_jsonl(self.db,destination,self.now().isoformat())
+
+    @classmethod
+    def import_jsonl(cls, source, path, **options):
+        """Restore an export into a new database at ``path`` and open it."""
+        path=Path(path).resolve()
+        path.parent.mkdir(parents=True,exist_ok=True)
+        with FileLock(str(path)+'.init.lock',timeout=30,mode=0o600):
+            result=schema.import_jsonl(source,path)
+        return cls(path,**options),result
 
     def _rows(self, table):
         return [json.loads(row['payload']) for row in self.db.execute(f'SELECT payload FROM {table}')]

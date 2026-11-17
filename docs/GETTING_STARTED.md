@@ -89,6 +89,12 @@ Ask the client to list projects, retrieve one source passage, then track a ficti
 
 Doctor inspects local readiness; it does not authorize or contact a server. For an approved Symphony OAuth MCP endpoint, follow [Symphony MCP setup](SYMPHONY_MCP.md). Endpoint tools, scopes and response schema must be verified against your actual server. No vendor-specific Jira/GitHub/Confluence integration or live company-server test is implied by the fictional demo or smoke result.
 
+### Upgrades, backups and moving your data
+
+The database records its schema version. When a new Work Copilot changes the schema, the first start migrates it in ordered steps, after copying the old database to `backups/` in your data folder. A database from a newer Work Copilot is refused, not opened. `doctor` shows the schema version.
+
+To back up or move everything, `work-copilot --data-dir <dir> export --jsonl state.jsonl` writes all local state to one JSONL file. `work-copilot --data-dir <new empty dir> import --jsonl state.jsonl` restores it; import never merges into or overwrites an existing database. The file holds your captured work text, so keep it in the same approved storage as the data folder.
+
 ### Common first-run issues
 
 - **Python/venv missing:** install Python 3.11+ through your normal approved process. Some Linux distributions package venv separately. No global installation is performed by Work Copilot.
@@ -99,4 +105,4 @@ Doctor inspects local readiness; it does not authorize or contact a server. For 
 - **Vault rejected:** symlinked roots/paths are not supported. Select an actual work-only folder; do not broaden filesystem permissions blindly.
 - **Smoke fails:** keep its failing phase and error when reporting the problem. The synthetic check contains no work payload; review any additional logs before sharing. A successful smoke is not proof of live connector or actual-client compatibility.
 
-The app does not encrypt your SQLite/Markdown files, supply backups, enforce live enterprise ACLs, or stay awake when the laptop sleeps. Use approved local storage and keep private state out of Git. Nothing in these steps deploys a cloud service or installs a startup agent.
+The app does not encrypt your SQLite/Markdown files or its backups, schedule backups, enforce live enterprise ACLs, or stay awake when the laptop sleeps. Use approved local storage and keep private state out of Git. Nothing in these steps deploys a cloud service or installs a startup agent.
