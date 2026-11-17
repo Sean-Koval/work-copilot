@@ -14,6 +14,7 @@ from pathlib import Path
 from filelock import FileLock
 from .knowledge import ENVELOPE_VERSION, validate_envelope
 from .rules import Rules
+from .ids import intent_key as make_intent_key, is_intent_key, parse_intent_key, validate_source_id
 
 
 class ConflictError(ValueError):
@@ -260,12 +261,15 @@ class Store:
                 # The shared Source contract (schema_version 1) covers id, revision,
                 # provider, title, body, observed_at, obligations and url.
                 validate_envelope(source)
+                validate_source_id(source['id'],source['provider'])
                 source.setdefault('projects',[])
                 source.setdefault('obligations',[])
                 source.setdefault('deleted',False)
                 source.setdefault('url',None)
                 if not isinstance(source['projects'],list) or not isinstance(source['obligations'],list):
                     raise ValueError('Projects and obligations must be lists')
+                for candidate in source['obligations']:
+                    parse_intent_key(candidate['intent_key'])
                 old=self._source(source['id'])
                 prior=self.db.execute('SELECT payload FROM source_revisions WHERE id=? AND revision=?',(source['id'],source['revision'])).fetchone()
                 if prior:
@@ -293,7 +297,8 @@ class Store:
                         self.db.execute('INSERT OR IGNORE INTO projects VALUES(?,?)',(project['id'],project.get('name',project['id'])))
                         self.db.execute('INSERT OR IGNORE INTO source_projects VALUES(?,?,?)',(source['id'],project['id'],project.get('workstream','')))
                     for candidate in source['obligations']:
-                        canonical=_json([candidate.get('project_id'),candidate['intent_key']])
+                        # The intent key names its source and site, so it alone is the identity.
+                        canonical=candidate['intent_key']
                         existing_row=self.db.execute('SELECT obligation_id FROM source_intents WHERE source_id=? AND candidate_key=?',(source['id'],canonical)).fetchone()
                         if not existing_row:
                             existing_row=self.db.execute('SELECT id FROM obligations WHERE canonical=?',(canonical,)).fetchone()
@@ -361,7 +366,8 @@ class Store:
                 raise ConflictError('Obligation changed; reload before reviewing')
             if changes.get('project_id') and not self.db.execute('SELECT 1 FROM projects WHERE id=?',(changes['project_id'],)).fetchone():
                 raise ValueError('Unknown project; import an explicit project first')
-            if 'project_id' in changes:
+            if 'project_id' in changes and not is_intent_key(ob['intent_key']):
+                # Records stored before KAN-392 keep their (project, intent) identity.
                 canonical=_json([changes['project_id'],ob['intent_key']])
                 duplicate=self.db.execute('SELECT id FROM obligations WHERE canonical=? AND id!=?',(canonical,id)).fetchone()
                 if duplicate:
@@ -548,6 +554,7 @@ class Store:
         body=payload.get('body','')
         if not isinstance(body,str) or len(body)>100000:
             raise ValueError('Body must be text of at most 100000 characters')
+        parse_intent_key(payload['intent_key'])
         candidate={k:v for k,v in payload.items() if k not in ('evidence_ids','body')}
         candidate.setdefault('owner',self.rules.self_owner); candidate.setdefault('status','waiting')
         self._validate_changes(candidate)
@@ -567,11 +574,11 @@ class Store:
                     project={'id':candidate['project_id'],'name':candidate['project_id']}
                 else:
                     project=dict(row)
-            canonical=_json([candidate.get('project_id'),candidate['intent_key']])
+            canonical=candidate['intent_key']
             existing=self.db.execute('SELECT id FROM obligations WHERE canonical=?',(canonical,)).fetchone()
             if existing:
                 return self._obligation(existing[0])
-            source={'id':'local/obligation/'+_id(canonical),'revision':'1','provider':'local-user','title':'User-entered obligation: '+candidate['title'],'body':'Explicitly entered by the local user. '+candidate['title']+('\n\n'+body if body else ''),'projects':[project] if project else [],'obligations':[candidate]}
+            source={'id':'local-user:local:obligation/'+_id(canonical),'revision':'1','provider':'local-user','title':'User-entered obligation: '+candidate['title'],'body':'Explicitly entered by the local user. '+candidate['title']+('\n\n'+body if body else ''),'projects':[project] if project else [],'obligations':[candidate]}
             self.ingest([source],connector='local-user')
             oid=self.db.execute('SELECT id FROM obligations WHERE canonical=?',(canonical,)).fetchone()[0]
             for sid in ids:
@@ -596,10 +603,11 @@ class Store:
                     raise ValueError('Review items need key, title, body, revision and opened_at')
                 _instant(item['opened_at'])
                 self._validate_changes({k:item.get(k) for k in ('title','due_at')})
-                sid='review/'+item['key']
+                sid=validate_source_id(connector+':local:'+item['key'])
+                intent=make_intent_key(sid,'review')
                 url=item.get('url') if isinstance(item.get('url'),str) and item['url'].startswith(('https://','http://')) else None
                 self.ingest([{'id':sid,'revision':item['revision'],'provider':connector,'title':item['title'],'body':item['body'],'url':url,'observed_at':observed}],connector=connector)
-                canonical=_json([None,'review:'+item['key']])
+                canonical=intent
                 row=self.db.execute('SELECT id FROM obligations WHERE canonical=?',(canonical,)).fetchone()
                 values={k:item.get(k) for k in fields} | {'url':url}
                 if row:
@@ -614,7 +622,7 @@ class Store:
                     oid=ob['id']
                 else:
                     oid=_id(canonical)
-                    ob={'id':oid,'intent_key':'review:'+item['key'],'kind':'review',**values,'project_id':None,'owner':self.rules.self_owner,'status':'open','question_state':'pending','follow_up_at':None,'waiting_on':None,'commitment':False,'revision':1,'created_at':self.now().isoformat(),'reviewed':True}
+                    ob={'id':oid,'intent_key':intent,'kind':'review',**values,'project_id':None,'owner':self.rules.self_owner,'status':'open','question_state':'pending','follow_up_at':None,'waiting_on':None,'commitment':False,'revision':1,'created_at':self.now().isoformat(),'reviewed':True}
                     self.db.execute('INSERT INTO obligations VALUES(?,?,?)',(oid,canonical,_json(ob)))
                     opened.append(oid)
                 self.db.execute('INSERT OR IGNORE INTO evidence VALUES(?,?)',(oid,sid))
