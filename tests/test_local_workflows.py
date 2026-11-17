@@ -1,6 +1,7 @@
 """UI and agent entrypoints share the durable local context service."""
 from fastapi.testclient import TestClient
 from work_copilot.app import create_app
+from work_copilot.ids import ask_kind
 
 
 def test_inbox_map_search_track_and_restart(tmp_path):
@@ -23,7 +24,7 @@ def test_inbox_map_search_track_and_restart(tmp_path):
         assert r.json().get('due_at') is None
     from work_copilot.store import Store
     store=Store(tmp_path/'data'/'copilot.db')
-    assert any(o['intent_key']=='alex-transcript' for o in store.snapshot()['obligations'])
+    assert any(ask_kind(o['intent_key'])=='alex-transcript' for o in store.snapshot()['obligations'])
     store.close()
 
 
@@ -52,8 +53,8 @@ def test_edit_room_bindings_priority_and_overdue_ui_contract(tmp_path):
         assert updated.status_code==200,updated.text
         assert c.patch('/api/projects/atlas',json={'revision':project['config_revision'],'changes':{'name':'stale'}},headers=h).status_code==409
         assert c.patch('/api/projects/atlas',json={'revision':updated.json()['config_revision'],'changes':{'unknown':True}},headers=h).status_code==400
-        app.state.store.ingest([{'id':'fixture:room','revision':'1','provider':'fixture','title':'Engineering room','body':'Fictional staging evidence','room_id':'tenant:shared','projects':[],'obligations':[]}])
-        assert c.get('/api/projects/atlas').json()['sources'][0]['id']=='fixture:room'
+        app.state.store.ingest([{'id':'fixture:fictional:room','revision':'1','provider':'fixture','title':'Engineering room','body':'Fictional staging evidence','room_id':'tenant:shared','projects':[],'obligations':[]}])
+        assert c.get('/api/projects/atlas').json()['sources'][0]['id']=='fixture:fictional:room'
         action=c.post('/api/obligations',json={'payload':{'intent_key':'dev-work','title':'Do implementation','project_id':'atlas','status':'open','owner':'me','waiting_on':'Fictional reviewer','commitment':True,'due_at':'2020-01-01','follow_up_at':'2020-01-01'}},headers=h).json()
         state=c.get('/api/state').json()
         assert action['id'] in [o['id'] for o in state['week']['overdue']]

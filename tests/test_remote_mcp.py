@@ -103,7 +103,7 @@ async def test_real_http_mcp_oauth_discovery_collect_restart(tmp_path, monkeypat
     mcp=FastMCP('fictional-read-source',stateless_http=True,streamable_http_path='/')
     @mcp.tool(annotations={'readOnlyHint':True})
     def read_messages(cursor: str | None=None):
-        return {'items':[{'id':'fictional:room:1','revision':'1','provider':'fixture','title':'Request','body':'Confirm staging only','projects':[], 'obligations':[{'intent_key':'confirm-staging','title':'Confirm staging','owner':'me','status':'open'}]}], 'checkpoint':'1'}
+        return {'items':[{'id':'fixture:fictional:room:1','revision':'1','provider':'fixture','title':'Request','body':'Confirm staging only','projects':[], 'obligations':[{'intent_key':'fixture:fictional:room:1:confirm-staging','title':'Confirm staging','owner':'me','status':'open'}]}], 'checkpoint':'1'}
     @mcp.tool(annotations={'readOnlyHint':False})
     def send_message():
         raise AssertionError('Write tool must never execute')
@@ -161,7 +161,7 @@ async def test_real_http_mcp_oauth_discovery_collect_restart(tmp_path, monkeypat
         fake_keyring.entries[('work-copilot',token_key)]=json.dumps(saved)
         store.close(); store=Store(tmp_path/'copilot.db')
         result=await remote_collect(store,config,tmp_path,False)
-        assert result['items']==1 and store.list_sources()[0]['id']=='fictional:room:1'
+        assert result['items']==1 and store.list_sources()[0]['id']=='fixture:fictional:room:1'
         assert store.snapshot()['connectors'][0]['checkpoint']=='1'
         obligation=store.snapshot()['obligations'][0]
         store.set_connector('remote-mcp','auth_expired')

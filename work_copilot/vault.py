@@ -15,7 +15,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 from urllib.parse import urlparse, quote
 
-from .ids import ASK_KIND
+from .ids import ASK_KIND, parse_intent_key, validate_source_id
 
 GENERATED_DIR = 'Work Copilot Generated'
 _MARKER = '.work-copilot-generated.json'
@@ -134,6 +134,10 @@ def _capture_vault_unlocked(store, root) -> dict:
                     raise ValueError('obligations must be a JSON array of objects')
                 # A bare ask kind in a note (intent_key: reply) is an ask from that note.
                 obligations = [{**o, 'intent_key': f"{sid}:{o['intent_key']}"} if isinstance(o.get('intent_key'), str) and ASK_KIND.fullmatch(o['intent_key']) else o for o in obligations]
+                # Refuse a bad id or key here, so one note is reported instead of failing the whole capture.
+                validate_source_id(sid, 'vault')
+                for obligation in obligations:
+                    parse_intent_key(obligation.get('intent_key'))
                 suggestions = []
                 if not ids:
                     for project in known_projects:
