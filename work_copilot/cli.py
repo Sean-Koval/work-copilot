@@ -26,8 +26,8 @@ def _review_settings(args, repo):
 
 def _run():
     parser=argparse.ArgumentParser(description='Local-first Work Copilot. No external sending.')
-    parser.add_argument('--timezone',default=os.environ.get('WORK_COPILOT_TIMEZONE','UTC'),help='IANA timezone for Today/follow-ups; default UTC')
-    parser.add_argument('--data-dir',type=Path,help='Private state directory (never a public repository)')
+    parser.add_argument('--timezone',help='IANA timezone for Today/follow-ups. Default: WORK_COPILOT_TIMEZONE, else UTC')
+    parser.add_argument('--data-dir',type=Path,help='Private state directory (never a public repository). Default: WORK_COPILOT_DATA_DIR (not for demo), else the per-user app-data folder')
     sub=parser.add_subparsers(dest='command',required=True)
     for name in ['init','demo','serve','capture','export','import','mcp','connect','collect','doctor','activity','drain-activity','smoke','review-queue']:
         p=sub.add_parser(name)
@@ -37,6 +37,11 @@ def _run():
             p.add_argument('--queue-only',action='store_true')
         elif name=='drain-activity':
             p.add_argument('--config',type=Path)
+        elif name=='init':
+            p.add_argument('--wizard',action='store_true',help='Create the vault folders and first project, choose data dir and timezone, print the claude mcp add line')
+            p.add_argument('--vault',type=Path,help='Work-only Markdown folder (wizard)')
+            p.add_argument('--project-id',help='Stable id of the first project (wizard)')
+            p.add_argument('--project-name',help='Display name of the first project (wizard)')
         elif name=='doctor':
             p.add_argument('--vault',type=Path)
             p.add_argument('--config',type=Path)
@@ -70,13 +75,28 @@ def _run():
         if not result.get('success'):
             raise SystemExit(1)
         return
+    timezone_given=bool(args.timezone or os.environ.get('WORK_COPILOT_TIMEZONE'))
+    args.timezone=args.timezone or os.environ.get('WORK_COPILOT_TIMEZONE') or 'UTC'
     from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
     try:
         ZoneInfo(args.timezone)
     except ZoneInfoNotFoundError:
         parser.error('Unknown IANA timezone')
     os.environ['WORK_COPILOT_TIMEZONE']=args.timezone
+    if args.data_dir is None and args.command!='demo' and os.environ.get('WORK_COPILOT_DATA_DIR'):
+        args.data_dir=Path(os.environ['WORK_COPILOT_DATA_DIR'])
     data=(args.data_dir or default_data_dir(args.command=='demo')).expanduser().resolve()
+    if args.command=='init' and args.wizard:
+        from .wizard import run_wizard
+        try:
+            print('\n'.join(run_wizard(args,data,timezone_given,data_dir_given=args.data_dir is not None)))
+        except (ValueError,OSError) as exc:
+            print(f'Error: {exc}',file=sys.stderr)
+            raise SystemExit(1)
+        except EOFError:
+            print('Error: input ended before the wizard finished; nothing else was created.',file=sys.stderr)
+            raise SystemExit(1)
+        return
     if args.command=='doctor':
         from .doctor import diagnose_path
         print(json.dumps(diagnose_path(data,vault=args.vault,config=args.config,timezone_name=args.timezone),indent=2,default=str))
