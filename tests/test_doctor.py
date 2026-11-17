@@ -189,8 +189,7 @@ def test_doctor_overlay_states(tmp_path):
     import json
     from work_copilot.doctor import overlay_check
     missing=overlay_check(tmp_path)
-    assert missing['state']=='not_applied' and missing['status']=='warning' and 'overlay apply' in missing['fix']
-    assert 'not yet available' in missing['fix']
+    assert missing['state']=='not_applied' and missing['status']=='warning' and 'work-copilot overlay apply' in missing['fix'] and 'work_copilot_overlay.py' in missing['fix']
     marker=tmp_path/'overlay.json'
     marker.write_text(json.dumps({'name':'fictional-co','placeholder':True,'applied_at':'2026-11-17T00:00:00Z'}))
     assert overlay_check(tmp_path)['state']=='placeholder'

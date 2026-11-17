@@ -175,9 +175,9 @@ def _mcp_registration_check(directory, timezone_name=None, vault=None, home=None
 
 
 def overlay_check(directory, overlay=None):
-    """Report the company overlay marker. KAN-381 adds `overlay apply`, which writes it."""
+    """Report the company overlay recorded by `work-copilot overlay apply`."""
     path = Path(overlay) if overlay else Path(directory)/'overlay.json'
-    fix = 'An overlay is applied by `work-copilot overlay apply <org.yaml>` (KAN-381, not yet available).'
+    fix = 'Render the overlay from your harness (team-harness: python scripts/work_copilot_overlay.py --harness <name> --out work-copilot-overlay.json), then run `work-copilot overlay apply work-copilot-overlay.json`.'
     try:
         if not path.exists():
             return {'ok':False,'status':'warning','state':'not_applied','note':'No company overlay applied; defaults are generic.','fix':fix}
@@ -188,7 +188,7 @@ def overlay_check(directory, overlay=None):
             raise ValueError('not an object')
     except (OSError, ValueError):
         return {'ok':False,'status':'warning','state':'invalid','path':str(path),'note':'Overlay marker is unreadable, invalid or a symlink; it was not changed.','fix':fix}
-    details = {k: marker.get(k) for k in ('name','applied_at') if isinstance(marker.get(k), str)}
+    details = {k: marker.get(k) for k in ('name','applied_at','work_site','kb_space','jira_project','room') if isinstance(marker.get(k), str)}
     if marker.get('placeholder'):
         return {'ok':False,'status':'warning','state':'placeholder','path':str(path),**details,'note':'A placeholder overlay is applied; replace it with your company overlay.','fix':fix}
     if details.get('name') and details.get('applied_at'):

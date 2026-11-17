@@ -29,7 +29,7 @@ def _run():
     parser.add_argument('--timezone',help='IANA timezone for Today/follow-ups. Default: WORK_COPILOT_TIMEZONE, else UTC')
     parser.add_argument('--data-dir',type=Path,help='Private state directory (never a public repository). Default: WORK_COPILOT_DATA_DIR (not for demo), else $XDG_DATA_HOME/work-copilot, else ~/.local/share/work-copilot (also on Windows)')
     sub=parser.add_subparsers(dest='command',required=True)
-    for name in ['init','demo','serve','capture','export','import','mcp','connect','collect','doctor','activity','drain-activity','smoke','review-queue']:
+    for name in ['init','demo','serve','capture','export','import','mcp','connect','collect','doctor','activity','drain-activity','smoke','review-queue','overlay']:
         p=sub.add_parser(name)
         if name=='activity':
             p.add_argument('--file',type=Path,required=True,help='Structured local session event JSON; no trace scraping')
@@ -62,6 +62,9 @@ def _run():
         elif name=='review-queue':
             p.add_argument('--repo',type=Path,default=os.environ.get('WORK_COPILOT_KNOWLEDGE_REPO'),help='Local clone of the knowledge repository (read only). Default: WORK_COPILOT_KNOWLEDGE_REPO')
             _review_options(p)
+        elif name=='overlay':
+            p.add_argument('action',choices=['apply','show'],help='apply: check an overlay file and record it in the data directory. show: print the recorded overlay')
+            p.add_argument('file',type=Path,nargs='?',help='Overlay JSON rendered by team-harness scripts/work_copilot_overlay.py')
         elif name=='import':
             p.add_argument('file',type=Path,help='Normalized JSON envelope or source array')
         elif name in {'connect','collect'}:
@@ -101,9 +104,23 @@ def _run():
         from .doctor import diagnose_path
         print(json.dumps(diagnose_path(data,vault=args.vault,config=args.config,timezone_name=args.timezone),indent=2,default=str))
         return
+    if args.command=='overlay' and args.action=='show':
+        from .doctor import overlay_check
+        print(json.dumps(overlay_check(data),indent=2))
+        return
+    if args.command=='overlay' and args.file is None:
+        parser.error('overlay apply needs the overlay file')
     data.mkdir(parents=True,exist_ok=True,mode=0o700)
     if os.name=='posix':
         os.chmod(data,0o700)
+    if args.command=='overlay':
+        from .overlay import apply
+        try:
+            print(json.dumps(apply(data,args.file),indent=2,ensure_ascii=False))
+        except (ValueError,OSError) as exc:
+            print(f'Error: {exc}',file=sys.stderr)
+            raise SystemExit(1)
+        return
     if args.command=='activity' and args.queue_only:
         from .hooks import enqueue_activity, MAX_EVENT_BYTES
         if args.file.stat().st_size>MAX_EVENT_BYTES:
