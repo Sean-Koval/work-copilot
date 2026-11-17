@@ -52,10 +52,14 @@ def measure(count, folder):
     reopen = time.perf_counter() - started
 
     server = build_server(Path(folder))
-    tool = server._tool_manager.get_tool('get_attention')
-    started = time.perf_counter()
-    result = json.loads(tool.fn())
-    attention = time.perf_counter() - started
+    try:
+        tool = server._tool_manager.get_tool('get_attention')
+        started = time.perf_counter()
+        result = json.loads(tool.fn())
+        attention = time.perf_counter() - started
+    finally:
+        # Windows cannot delete the temporary folder while the database is open.
+        server.work_copilot_store.close()
     return {'sources': count, 'obligations': result['page']['total'], 'reopen_seconds': round(reopen, 3),
             'get_attention_seconds': round(attention, 3)}
 
