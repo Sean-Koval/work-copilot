@@ -132,7 +132,7 @@ def test_invalid_rules_are_refused(tmp_path, bad):
         Store(tmp_path / 's.db')
 
 
-@pytest.mark.parametrize('text', ['{not json', '[' * 100000])
+@pytest.mark.parametrize('text', ['{not json', '[' * 100000], ids=['not-json', 'deep-nesting'])
 def test_unreadable_rules_file_is_refused(tmp_path, text):
     (tmp_path / RULES_FILE).write_text(text, encoding='utf-8')
     with pytest.raises(ValueError, match='rules.json'):
