@@ -14,7 +14,7 @@ from pathlib import Path
 from filelock import FileLock
 from .knowledge import ENVELOPE_VERSION, validate_envelope
 from .rules import Rules
-from .ids import intent_key as make_intent_key, is_intent_key, parse_intent_key, validate_source_id
+from .ids import intent_key as make_intent_key, is_intent_key, parse_intent_key, tracked_intent_key, validate_source_id
 
 
 class ConflictError(ValueError):
@@ -563,8 +563,8 @@ class Store:
         body=payload.get('body','')
         if not isinstance(body,str) or len(body)>100000:
             raise ValueError('Body must be text of at most 100000 characters')
-        parse_intent_key(payload['intent_key'])
         candidate={k:v for k,v in payload.items() if k not in ('evidence_ids','body')}
+        candidate['intent_key']=tracked_intent_key(payload['intent_key'])
         candidate.setdefault('owner',self.rules.self_owner); candidate.setdefault('status','waiting')
         candidate['owner']=self.rules.owner(candidate['owner'])
         self._validate_changes(candidate)

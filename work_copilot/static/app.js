@@ -288,7 +288,7 @@ function openTrack() {
   const title = $('h2','','Track waiting / action'); title.id = 'draft-title';
   append(content,append($('div','dialog-heading'),title,button('Close',()=>dialog.close(),'btn small')),$('p','lede','Explicit local intake, not inferred ownership. A follow-up reminder is separate from a promised due date.'));
   const name = field('What needs attention?'); name.input.maxLength = 300;
-  const intent = field('Stable intent key'); intent.input.placeholder = 'e.g. atlas-pilot-scope'; intent.input.maxLength = 200;
+  const intent = field('Stable intent key'); intent.input.placeholder = 'e.g. atlas-pilot-scope, or jira:acme.atlassian.net:ATLAS-12:reply'; intent.input.maxLength = 200;
   const project = selectControl('Project',[['','Unmapped — review later'],...state.projects.map(p=>[p.id,p.name])],'');
   const status = selectControl('State',[['waiting','Waiting'],['open','Open action'],['candidate','Candidate to review']],'waiting');
   const owner = selectControl('Owner',[['me','Me'],['','Unresolved']],'me');

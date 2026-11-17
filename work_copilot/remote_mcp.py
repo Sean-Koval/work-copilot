@@ -26,6 +26,8 @@ from mcp.client.auth import OAuthClientProvider
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata, OAuthToken, OAuthMetadata
 
+from .ids import SOURCE_ID
+
 
 class _RedactOAuthLog(logging.Filter):
     def filter(self, record):
@@ -262,6 +264,11 @@ def load_config(path):
         raise ValueError('mapping.fields must map output names to nonempty dot-separated object paths')
     if not isinstance(mapping.get('constants', {}), dict):
         raise ValueError('mapping.constants must be a JSON object')
+    if 'id_prefix' in mapping:
+        prefix = mapping['id_prefix']
+        # provider:site: so a mapped item id becomes provider:site:<the item's id>.
+        if not isinstance(prefix, str) or not prefix.endswith(':') or not SOURCE_ID.fullmatch(prefix + 'x'):
+            raise ValueError('mapping.id_prefix must be provider:site: (for example symphony:acme-tenant:)')
     return config
 
 
@@ -408,6 +415,9 @@ def normalize_result(payload, mapping):
         items = [{**mapping.get('constants',{}), **{key:_path(item,path) for key,path in fields.items()}} for item in items]
     if not all(isinstance(item,dict) for item in items):
         raise ValueError('Source items must be objects')
+    prefix = mapping.get('id_prefix')
+    if prefix:
+        items = [{**item, 'id': prefix + str(item['id'])} if isinstance(item.get('id'), (str, int)) and not isinstance(item.get('id'), bool) else item for item in items]
     return items, _path(payload,mapping.get('next_cursor_path','next_cursor')), _path(payload,mapping.get('checkpoint_path','checkpoint'))
 
 

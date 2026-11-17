@@ -15,6 +15,9 @@ not be ingested here) and a lower-case kind such as ``reply``, ``review`` or
 ask recorded twice, from any source or project mapping, is one obligation.
 
 Ingest refuses anything else. Records stored before these rules keep their ids.
+
+An obligation the user tracks by hand may give just an ask kind; it then comes from
+``local-user:local:tracked``, so tracking the same kind twice is one obligation.
 """
 from __future__ import annotations
 
@@ -70,6 +73,18 @@ def intent_key(source_id, kind):
     if not isinstance(kind, str) or not ASK_KIND.fullmatch(kind):
         raise ValueError('Ask kind must be lower case letters, digits and dashes')
     return f'{source_id}:{kind}'
+
+
+TRACKED_SOURCE = 'local-user:local:tracked'
+
+
+def tracked_intent_key(value):
+    """A full intent key as given, or a bare ask kind as an ask from ``TRACKED_SOURCE``."""
+    if is_intent_key(value):
+        return value
+    if isinstance(value, str) and ASK_KIND.fullmatch(value):
+        return f'{TRACKED_SOURCE}:{value}'
+    raise ValueError('Intent key must be a lower-case ask kind such as atlas-pilot-scope, or ' + INTENT_KEY_FORMAT)
 
 
 def ask_kind(value):

@@ -19,7 +19,7 @@ class ObligationInput(BaseModel):
     """A local follow-up to record. Omitted fields keep the store's defaults."""
 
     model_config = ConfigDict(extra='forbid')
-    intent_key: str = Field(min_length=1, description='Stable key; (project_id, intent_key) is the identity')
+    intent_key: str = Field(min_length=1, description='Stable key and the identity: <source id>:<ask kind> (for example jira:acme.atlassian.net:ATLAS-12:reply), or just a lower-case ask kind such as atlas-pilot-scope for an ask you track by hand')
     title: str = Field(min_length=1)
     project_id: str | None = None
     owner: str | None = Field(default=None, description="'me' only with explicit evidence; default 'me'")
