@@ -828,6 +828,35 @@ class Store:
             self._project_source(source)
         self.db.execute('INSERT INTO local_metadata VALUES(?,?) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload',('projections',_json({'version':PROJECTION_VERSION})))
 
+    def vault_root(self, vault_id):
+        """The folder this store last captured the vault ``vault_id`` from, or None."""
+        with self._lock:
+            row=self.db.execute('SELECT payload FROM local_metadata WHERE key=?',('vault-root:'+vault_id,)).fetchone()
+            return json.loads(row[0])['root'] if row else None
+
+    def adopt_vault(self, vault_id, root, legacy_namespace):
+        """Record where the vault lives, and once rename notes from its old path-hash namespace (KAN-391).
+
+        Old ids are ``vault:<legacy>:<path>`` and the connector is ``vault:<legacy>``. Every
+        recorded copy of that token, in ids, payloads, obligation keys and evidence links, is
+        rewritten to ``vault:<vault_id>`` in one transaction, then search and project links
+        are rebuilt. The token is 20 hex digits of a hash, so it matches nothing else.
+        """
+        if not re.fullmatch(r'[0-9a-f]{32}',vault_id) or not re.fullmatch(r'[0-9a-f]{20}',legacy_namespace):
+            raise ValueError('Invalid vault namespace')
+        old,new='vault:'+legacy_namespace,'vault:'+vault_id
+        with self._transaction():
+            migrated=self.db.execute("SELECT count(*) FROM sources WHERE id LIKE ?",(old+':%',)).fetchone()[0]
+            if migrated:
+                if self.db.execute("SELECT 1 FROM sources WHERE id LIKE ? LIMIT 1",(new+':%',)).fetchone():
+                    raise ValueError('This vault has notes under both its old and its new id; run doctor and capture again')
+                for table in schema.STATE_TABLES:
+                    for column in [row[1] for row in self.db.execute(f'PRAGMA table_info({table})') if row[2].upper()=='TEXT']:
+                        self.db.execute(f'UPDATE {table} SET {column}=replace({column},?,?) WHERE instr({column},?)>0',(old,new,old))
+                self._rebuild_all_projections()
+            self.db.execute('INSERT INTO local_metadata VALUES(?,?) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload',('vault-root:'+vault_id,_json({'root':root})))
+            return {'migrated':migrated}
+
     def rebuild_projections(self):
         """Explicit repair: rebuild the search index and project links. Recorded state is untouched."""
         with self._transaction():
