@@ -95,7 +95,7 @@ def test_wizard_interrupted_prompt_creates_nothing(tmp_path, monkeypatch, capsys
     def interrupted(prompt):
         raise error
     monkeypatch.setattr('builtins.input', interrupted)
-    monkeypatch.setattr('sys.stdin', SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setattr('work_copilot.wizard.stdin_is_terminal', lambda stream=None: True)
     for name in ('HOME', 'USERPROFILE', 'XDG_DATA_HOME', 'CLAUDE_CONFIG_DIR'):
         monkeypatch.setenv(name, str(tmp_path/'home'))
     monkeypatch.setenv('WORK_COPILOT_TIMEZONE', 'UTC')  # _run sets it; restored afterwards
