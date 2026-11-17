@@ -80,12 +80,12 @@ def test_empty_legacy_folder_is_ignored_and_new_data_wins(home, tmp_path, monkey
 
 def test_doctor_says_when_the_legacy_folder_is_used(home, monkeypatch, capsys):
     on(monkeypatch,'darwin')
-    legacy=home/'.local'/'share'/'work-copilot';legacy.mkdir(parents=True);(legacy/'keep.txt').write_text('keep')
+    legacy=home/'.local'/'share'/'work-copilot';seed(legacy)
     monkeypatch.setattr(sys,'argv',['work-copilot','doctor'])
     cli._run()
     report=json.loads(capsys.readouterr().out)
     assert str(legacy.resolve()) in report['data_dir_note']
-    assert sorted(p.name for p in legacy.iterdir())==['keep.txt']
+    assert sorted(p.name for p in legacy.iterdir())==['copilot.db']
 
 
 def test_doctor_has_no_note_for_the_new_folder_or_an_explicit_one(home, tmp_path, monkeypatch, capsys):
@@ -98,3 +98,26 @@ def test_doctor_has_no_note_for_the_new_folder_or_an_explicit_one(home, tmp_path
     monkeypatch.setattr(sys,'argv',['work-copilot','doctor'])
     cli._run()
     assert 'data_dir_note' not in json.loads(capsys.readouterr().out)
+
+
+@pytest.mark.parametrize('platform',['darwin','win32'])
+def test_stray_files_do_not_pick_a_folder(home, tmp_path, monkeypatch, platform):
+    on(monkeypatch,platform);monkeypatch.setenv('LOCALAPPDATA',str(tmp_path/'Local'))
+    new=(tmp_path/'Local' if platform=='win32' else home/'Library'/'Application Support')/'work-copilot'
+    legacy=home/'.local'/'share'/'work-copilot'
+    seed(legacy);new.mkdir(parents=True);(new/'.DS_Store').write_bytes(b'x')
+    assert cli.default_data_dir()==legacy
+    (legacy/'copilot.db').unlink();(legacy/'Thumbs.db').write_bytes(b'x')
+    assert cli.default_data_dir()==new
+
+
+def test_init_keeps_using_the_legacy_folder_and_creates_no_new_one(home, tmp_path, monkeypatch, capsys):
+    from work_copilot.store import Store  # imported before the platform is patched
+    on(monkeypatch,'darwin')
+    legacy=home/'.local'/'share'/'work-copilot';seed(legacy)
+    legacy_db=legacy/'copilot.db';legacy_db.unlink()
+    Store(legacy_db).close()
+    monkeypatch.setattr(sys,'argv',['work-copilot','init'])
+    cli._run()
+    assert json.loads(capsys.readouterr().out)['data_dir']==str(legacy.resolve())
+    assert not (home/'Library').exists()

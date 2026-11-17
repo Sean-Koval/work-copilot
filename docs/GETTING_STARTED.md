@@ -11,7 +11,9 @@ uv tool install git+https://github.com/Sean-Koval/work-copilot
 work-copilot smoke
 ```
 
-`pipx install git+https://github.com/Sean-Koval/work-copilot` works the same way. Upgrade with `uv tool upgrade work-copilot`. Then use `work-copilot` wherever this guide says `./run.sh`.
+`pipx install git+https://github.com/Sean-Koval/work-copilot` works the same way. Without Git, use the archive: `uv tool install https://github.com/Sean-Koval/work-copilot/archive/refs/heads/main.zip`. If the shell then says `work-copilot` is not recognized, run `uv tool update-shell` (or `pipx ensurepath`) and open a new terminal. Upgrade with `uv tool upgrade work-copilot`. Then use `work-copilot` wherever this guide says `./run.sh`.
+
+This install takes the newest compatible dependencies, as CI's install check does; the clone's `run.sh` pins them with `constraints.txt`.
 
 **From a clone** (to read or change the code), from a terminal with Git and Python installed:
 
@@ -94,7 +96,7 @@ After installation, add a stdio MCP server using your client's supported configu
 }
 ```
 
-On Windows the Python executable is `.venv/Scripts/python.exe` (escape backslashes if using them in JSON). Omit `WORK_COPILOT_VAULT` if you do not want the agent to have the local `capture_note` tool. Explicit local tools can create projects, capture selected notes, track obligations and review local records. They cannot authorize or send external messages.
+On Windows the Python executable is `.venv/Scripts/python.exe` (escape backslashes if using them in JSON). With the one-command install, set `command` to the absolute path of `work-copilot` (`which work-copilot` on macOS or Linux, `(Get-Command work-copilot).Source` in PowerShell) and drop `"-m", "work_copilot"` from `args`. Omit `WORK_COPILOT_VAULT` if you do not want the agent to have the local `capture_note` tool. Explicit local tools can create projects, capture selected notes, track obligations and review local records. They cannot authorize or send external messages.
 
 Ask the client to list projects, retrieve one source passage, then track a fictional waiting item before using sensitive work context. Inspect the receipt and dashboard. The client—not this service—interprets natural language and chooses its model. Running this store locally does **not** guarantee your client's model processes data locally; obtain the required company approval first.
 

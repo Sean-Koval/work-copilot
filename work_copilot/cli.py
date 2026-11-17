@@ -12,8 +12,9 @@ def _legacy_data_dir(demo=False):
 
 
 def _holds_data(path):
+    # The database, not any file: a stray .DS_Store or Thumbs.db must not pick the folder.
     try:
-        return path.is_dir() and any(path.iterdir())
+        return (path/'copilot.db').is_file()
     except OSError:
         return False
 

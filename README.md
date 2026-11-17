@@ -20,6 +20,8 @@ work-copilot smoke   # isolated fictional-data check
 work-copilot demo    # open the persistent demo
 ```
 
+If `work-copilot` is "not recognized" or "command not found", run `uv tool update-shell` (or `pipx ensurepath`) and open a new terminal. Without Git, install from the archive instead: `uv tool install https://github.com/Sean-Koval/work-copilot/archive/refs/heads/main.zip`.
+
 Or work from a clone: `./run.sh smoke`, then `./run.sh` (it installs into the checkout's `.venv`).
 
 Open **http://127.0.0.1:8765**. Stop with Ctrl+C. Restarting keeps the demo state. No login service is installed.
