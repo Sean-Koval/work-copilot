@@ -27,7 +27,7 @@ def _review_settings(args, repo):
 def _run():
     parser=argparse.ArgumentParser(description='Local-first Work Copilot. No external sending.')
     parser.add_argument('--timezone',help='IANA timezone for Today/follow-ups. Default: WORK_COPILOT_TIMEZONE, else UTC')
-    parser.add_argument('--data-dir',type=Path,help='Private state directory (never a public repository). Default: WORK_COPILOT_DATA_DIR (not for demo), else $XDG_DATA_HOME/work-copilot, else ~/.local/share/work-copilot (also on Windows)')
+    parser.add_argument('--data-dir',type=Path,help='Private state directory (never a public repository). Default: WORK_COPILOT_DATA_DIR (not for demo), else the per-user data folder; init and doctor print the one in use')
     sub=parser.add_subparsers(dest='command',required=True)
     for name in ['init','demo','serve','capture','export','import','mcp','connect','collect','doctor','activity','drain-activity','smoke','review-queue']:
         p=sub.add_parser(name)
