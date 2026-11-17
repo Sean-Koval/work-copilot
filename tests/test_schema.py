@@ -253,3 +253,43 @@ def test_export_does_not_block_another_writer(tmp_path):
     other.request_refresh('written while another connection reads')
     store.db.rollback()
     store.export_jsonl(tmp_path / 'state.jsonl')
+
+
+def test_an_older_export_imports_after_a_migration_adds_a_table(tmp_path, monkeypatch):
+    _populated(tmp_path / 'a' / 'copilot.db').export_jsonl(tmp_path / 'v1.jsonl')
+
+    def add_table(db):
+        db.execute('CREATE TABLE retention_rules(key TEXT PRIMARY KEY, payload TEXT NOT NULL)')
+    monkeypatch.setattr(schema, 'MIGRATIONS', schema.MIGRATIONS + (add_table,))
+    monkeypatch.setattr(schema, 'SCHEMA_VERSION', len(schema.MIGRATIONS))
+    monkeypatch.setattr(schema, 'STATE_TABLES', schema.STATE_TABLES + ('retention_rules',))
+    restored, result = Store.import_jsonl(tmp_path / 'v1.jsonl', tmp_path / 'b' / 'copilot.db')
+    assert result['from_schema_version'] == 1 and result['schema_version'] == 2
+    assert restored.snapshot()['obligations']
+    restored.export_jsonl(tmp_path / 'v2.jsonl')
+    header = json.loads((tmp_path / 'v2.jsonl').read_text(encoding='utf-8').splitlines()[0])
+    assert header['schema_version'] == 2 and header['tables']['retention_rules'] == 0
+
+
+def test_backups_older_than_the_limit_are_removed_on_open(tmp_path):
+    from datetime import timedelta
+    path = tmp_path / 'copilot.db'
+    _legacy_database(path)
+    Store(path).close()
+    [backup] = schema.backups(path)
+    later = datetime.now(timezone.utc) + timedelta(days=schema.BACKUP_MAX_AGE_DAYS)
+    assert schema.prune_backups(path, now=later - timedelta(days=1)) == []
+    assert schema.prune_backups(path, now=later) == [str(backup)]
+    assert not backup.exists()
+
+
+def test_export_replaces_a_leftover_partial_file(tmp_path):
+    store = _populated(tmp_path / 'copilot.db')
+    leftover = tmp_path / 'state.jsonl.partial'
+    leftover.write_text('stale', encoding='utf-8')
+    if sys.platform != 'win32':
+        leftover.chmod(0o644)
+    store.export_jsonl(tmp_path / 'state.jsonl')
+    assert not leftover.exists()
+    if sys.platform != 'win32':
+        assert (tmp_path / 'state.jsonl').stat().st_mode & 0o777 == 0o600

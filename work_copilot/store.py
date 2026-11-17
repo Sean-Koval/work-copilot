@@ -72,6 +72,8 @@ class Store:
         self.db.execute('PRAGMA foreign_keys=ON')
         # Ordered migrations, with a backup first when the database already holds data.
         self.migration=schema.migrate(self.db,self.path)
+        # Backups hold captured text; keep none past the retention limit.
+        schema.prune_backups(self.path)
         # Search and project links are kept current on write. Rebuild them only when the
         # marker is missing (a migration or an import cleared it) or the projection code
         # changed, never on every open (KAN-388).
