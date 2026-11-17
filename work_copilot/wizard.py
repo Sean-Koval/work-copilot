@@ -108,6 +108,22 @@ def _check_project(data, timezone_name, project_id, project_name):
         raise ValueError(f'Project {project_id!r} already exists as {existing["name"]!r}; existing setup was not overwritten')
 
 
+def stdin_is_terminal(stream=None):
+    """True only for a real terminal. On Windows the NUL device also reports isatty(), so ask for a console mode."""
+    stream = sys.stdin if stream is None else stream
+    try:
+        if not stream.isatty():
+            return False
+        if os.name != 'nt':
+            return True
+        import ctypes
+        import msvcrt
+        mode = ctypes.c_ulong()
+        return bool(ctypes.windll.kernel32.GetConsoleMode(msvcrt.get_osfhandle(stream.fileno()), ctypes.byref(mode)))
+    except (AttributeError, OSError, ValueError):
+        return False
+
+
 def run_wizard(args, data_dir, timezone_given, data_dir_given=False, interactive=None):
     """Return the summary lines to print. Prompts only for missing values on a terminal.
 
@@ -115,7 +131,7 @@ def run_wizard(args, data_dir, timezone_given, data_dir_given=False, interactive
     """
     from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
     from .doctor import is_link, sync_provider
-    interactive = sys.stdin.isatty() if interactive is None else interactive
+    interactive = stdin_is_terminal() if interactive is None else interactive
     vault = _ask('Work-only Markdown vault folder', args.vault, interactive=interactive)
     project_id = _ask('First project id (stable, e.g. atlas)', args.project_id, interactive=interactive)
     project_name = _ask('First project name', args.project_name, interactive=interactive)

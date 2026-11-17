@@ -221,3 +221,14 @@ def test_powershell_quoting_doubles_typographic_single_quotes(monkeypatch):
 def test_wizard_names_powershell_on_windows(tmp_path, monkeypatch):
     lines = run_wizard(wizard_args(tmp_path/'vault', 'atlas', 'Atlas'), tmp_path/'data', True, True, interactive=False)
     assert ('in PowerShell (not cmd.exe)' if os.name == 'nt' else 'in your shell') in lines[-2]
+
+
+def test_stdin_is_terminal_needs_a_real_terminal():
+    from work_copilot.wizard import stdin_is_terminal
+    class NotTty:
+        def isatty(self): return False
+    class Closed:
+        def isatty(self): raise ValueError('closed')
+    assert stdin_is_terminal(NotTty()) is False and stdin_is_terminal(Closed()) is False
+    with open(os.devnull) as null:  # the NUL device reports isatty() on Windows but has no console
+        assert stdin_is_terminal(null) is False
