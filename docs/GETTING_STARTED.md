@@ -49,7 +49,7 @@ Choose an existing, approved **work-only Markdown folder**. Capture is recursive
 ./run.sh --timezone America/New_York --data-dir /absolute/private/copilot serve --vault /absolute/work-vault
 ```
 
-Or let the wizard set it up: it creates the vault's `Notes`, `Meeting notes`, `Research` and `Decision write-ups` folders, the first project and the private data directory, then prints the `claude mcp add` line. It only creates what is missing and overwrites nothing. On a terminal it asks for missing values; otherwise pass them all:
+Or let the wizard set it up: it creates the vault's `Notes`, `Meeting notes`, `Research` and `Decision write-ups` folders, the first project and the private data directory, then prints the `claude mcp add` line (on Windows, run it in PowerShell, not cmd.exe). It checks everything before creating anything, only creates what is missing and overwrites nothing. A new data directory gets owner-only permissions; an existing one is left as it is, with a warning if others can read it. On a terminal it asks for missing values; otherwise pass them all:
 
 ```sh
 ./run.sh --timezone America/New_York --data-dir /absolute/private/copilot init --wizard --vault /absolute/work-vault --project-id atlas --project-name Atlas
@@ -95,7 +95,7 @@ Ask the client to list projects, retrieve one source passage, then track a ficti
 ./run.sh --data-dir /absolute/private/copilot doctor --vault /absolute/work-vault
 ```
 
-Doctor inspects local readiness; it does not authorize or contact a server. It also reports whether Claude Code has a `work-copilot` server registered (user scope or `./.mcp.json`, and whether it uses the same data directory), whether the vault sits in OneDrive, iCloud, Dropbox or Google Drive (company notes copied into personal sync) or under a symlink, and whether a company overlay is applied. Each reports `ok`, `warning` or `error`, with a `fix` command when not ok; it only reads files. For an approved Symphony OAuth MCP endpoint, follow [Symphony MCP setup](SYMPHONY_MCP.md). Endpoint tools, scopes and response schema must be verified against your actual server. No vendor-specific Jira/GitHub/Confluence integration or live company-server test is implied by the fictional demo or smoke result.
+Doctor inspects local readiness; it does not authorize or contact a server. It also reports whether Claude Code has a `work-copilot` server registered (user scope, or local scope and `.mcp.json` for the project's git root, else the current directory; and whether it uses the same data directory), whether the vault sits in OneDrive, iCloud, Dropbox or Google Drive (company notes copied into personal sync) or under a symlink, and whether a company overlay is applied. Each reports `ok`, `warning` or `error`, with a `fix` when not ok; it only reads files. The overlay `fix` names `overlay apply`, which arrives with KAN-381. For an approved Symphony OAuth MCP endpoint, follow [Symphony MCP setup](SYMPHONY_MCP.md). Endpoint tools, scopes and response schema must be verified against your actual server. No vendor-specific Jira/GitHub/Confluence integration or live company-server test is implied by the fictional demo or smoke result.
 
 ### Common first-run issues
 

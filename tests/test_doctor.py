@@ -139,7 +139,7 @@ def test_doctor_mcp_registration_user_project_and_local_scopes(tmp_path, monkeyp
     assert _registration(tmp_path,monkeypatch,user={'work-copilot':entry})['scope']=='user'
     assert _registration(tmp_path,monkeypatch,user={'other':entry},local={'work-copilot':entry})['scope']=='local'
     (tmp_path/'p').mkdir()
-    project=_registration(tmp_path/'p',monkeypatch,project={'work-copilot':{'command':'work-copilot','args':['mcp','--data-dir',str(tmp_path/'p'/'data')]}})
+    project=_registration(tmp_path/'p',monkeypatch,project={'work-copilot':{'command':'work-copilot','args':['--data-dir',str(tmp_path/'p'/'data'),'mcp']}})
     assert project['status']=='ok' and project['scope']=='project' and 'approval' in project['note']
 
 
@@ -190,6 +190,7 @@ def test_doctor_overlay_states(tmp_path):
     from work_copilot.doctor import overlay_check
     missing=overlay_check(tmp_path)
     assert missing['state']=='not_applied' and missing['status']=='warning' and 'overlay apply' in missing['fix']
+    assert 'not yet available' in missing['fix']
     marker=tmp_path/'overlay.json'
     marker.write_text(json.dumps({'name':'fictional-co','placeholder':True,'applied_at':'2026-11-17T00:00:00Z'}))
     assert overlay_check(tmp_path)['state']=='placeholder'
@@ -206,7 +207,8 @@ def test_doctor_new_checks_in_cli_output_and_read_only(tmp_path):
     import json,os,subprocess,sys
     home=tmp_path/'home';home.mkdir();vault=tmp_path/'vault';vault.mkdir()
     env={k:v for k,v in os.environ.items() if not k.startswith(('WORK_COPILOT_','CLAUDE_CONFIG'))}
-    env.update(HOME=str(home),USERPROFILE=str(home),WORK_COPILOT_DATA_DIR=str(tmp_path/'data'))
+    from pathlib import Path
+    env.update(HOME=str(home),USERPROFILE=str(home),WORK_COPILOT_DATA_DIR=str(tmp_path/'data'),PYTHONPATH=str(Path(__file__).resolve().parents[1]))
     out=subprocess.run([sys.executable,'-m','work_copilot','doctor','--vault',str(vault)],capture_output=True,text=True,env=env,cwd=tmp_path,timeout=60)
     checks=json.loads(out.stdout)['checks']
     for name in ('mcp_registration','vault_sync','overlay'):
@@ -219,9 +221,36 @@ def test_doctor_new_checks_in_cli_output_and_read_only(tmp_path):
 def test_doctor_mcp_registration_follows_scope_precedence_and_default_dir(tmp_path, monkeypatch):
     monkeypatch.setenv('XDG_DATA_HOME',str(tmp_path/'xdg'))
     right={'command':'work-copilot','args':['mcp'],'env':{'WORK_COPILOT_DATA_DIR':str(tmp_path/'data')}}
-    wrong={'command':'work-copilot','args':['mcp','--data-dir',str(tmp_path/'other')]}
+    wrong={'command':'work-copilot','args':['--data-dir',str(tmp_path/'other'),'mcp']}
     result=_registration(tmp_path,monkeypatch,user={'work-copilot':wrong},project={'work-copilot':right})
     assert result['status']=='ok' and result['scope']=='project'
     (tmp_path/'x').mkdir()
     unset=_registration(tmp_path/'x',monkeypatch,user={'work-copilot':{'command':'work-copilot','args':['mcp']}})
     assert unset['status']=='warning' and unset['registered_data_dir']==str(tmp_path/'xdg'/'work-copilot')
+    monkeypatch.setenv('WORK_COPILOT_DATA_DIR',str(tmp_path/'inherited'))
+    inherited=_registration(tmp_path/'x',monkeypatch,user={'work-copilot':{'command':'work-copilot','args':['mcp']}})
+    assert inherited['registered_data_dir']==str(tmp_path/'inherited')
+
+
+def test_doctor_mcp_registration_reads_data_dir_equals_form(tmp_path, monkeypatch):
+    from work_copilot.doctor import _registered_data_dir
+    assert _registered_data_dir({'args':['--data-dir='+str(tmp_path/'d'),'mcp']})==str(tmp_path/'d')
+    assert _registered_data_dir({'args':['--data-dir',str(tmp_path/'a'),'mcp'],'env':{'WORK_COPILOT_DATA_DIR':'b'}})==str(tmp_path/'a')
+    assert _registered_data_dir({'args':['mcp'],'env':{'WORK_COPILOT_DATA_DIR':'b'}})=='b'
+    entry={'command':'work-copilot','args':['--data-dir='+str(tmp_path/'data'),'mcp']}
+    assert _registration(tmp_path,monkeypatch,user={'work-copilot':entry})['status']=='ok'
+
+
+def test_doctor_mcp_registration_local_scope_keyed_at_git_root(tmp_path, monkeypatch):
+    import json
+    from work_copilot.doctor import _mcp_registration_check
+    monkeypatch.delenv('CLAUDE_CONFIG_DIR', raising=False)
+    home=tmp_path/'home';home.mkdir();repo=tmp_path/'repo';(repo/'.git').mkdir(parents=True);sub=repo/'src'/'deep';sub.mkdir(parents=True)
+    entry={'command':'work-copilot','args':['mcp'],'env':{'WORK_COPILOT_DATA_DIR':str(tmp_path/'data')}}
+    (home/'.claude.json').write_text(json.dumps({'projects':{str(repo):{'mcpServers':{'work-copilot':entry}}}}))
+    result=_mcp_registration_check(tmp_path/'data','UTC',home=home,cwd=sub)
+    assert result['status']=='ok' and result['scope']=='local' and result['project_dir']==str(repo)
+    assert str(repo) in result['note']
+    (home/'.claude.json').unlink();(repo/'.mcp.json').write_text(json.dumps({'mcpServers':{'work-copilot':entry}}))
+    project=_mcp_registration_check(tmp_path/'data','UTC',home=home,cwd=sub)
+    assert project['scope']=='project' and project['path']==str(repo/'.mcp.json')

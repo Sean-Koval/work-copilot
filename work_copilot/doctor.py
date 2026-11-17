@@ -41,6 +41,12 @@ def _storage_check(directory):
     return result
 
 
+def is_link(path):
+    """A symlink, or a Windows junction where Python can tell (3.12+)."""
+    path = Path(path)
+    return path.is_symlink() or bool(getattr(path, 'is_junction', lambda: False)())
+
+
 _SYNC_NAMES = (('onedrive', 'OneDrive'), ('dropbox', 'Dropbox'), ('google drive', 'Google Drive'),
                ('googledrive', 'Google Drive'), ('icloud drive', 'iCloud Drive'), ('com~apple~clouddocs', 'iCloud Drive'))
 
@@ -64,7 +70,7 @@ def sync_provider(path):
 def _vault_sync_check(vault):
     path = Path(vault).expanduser().absolute()
     try:
-        linked = any(p.is_symlink() for p in (path, *path.parents))
+        linked = any(is_link(p) for p in (path, *path.parents))
     except OSError:
         linked = False
     if linked:
@@ -91,27 +97,50 @@ def _registered(servers):
 
 
 def _registered_data_dir(entry):
-    data = (entry.get('env') or {}).get('WORK_COPILOT_DATA_DIR') if isinstance(entry.get('env'), dict) else None
+    """The data dir a registration selects: --data-dir in args, else WORK_COPILOT_DATA_DIR in its env."""
+    env = entry.get('env') if isinstance(entry.get('env'), dict) else {}
+    data = env.get('WORK_COPILOT_DATA_DIR')
     args = entry.get('args') if isinstance(entry.get('args'), list) else []
-    if '--data-dir' in args[:-1]:
-        data = args[args.index('--data-dir')+1]
+    for index, arg in enumerate(args):
+        if arg == '--data-dir' and index+1 < len(args):
+            data = args[index+1]
+        elif isinstance(arg, str) and arg.startswith('--data-dir='):
+            data = arg.split('=', 1)[1]
     return data if isinstance(data, str) and data else None
 
 
+def project_root(cwd):
+    """Claude Code keys local scope by the git root and reads .mcp.json there; else the cwd."""
+    cwd = Path(cwd)
+    for directory in (cwd, *cwd.parents):
+        try:
+            if (directory/'.git').exists():
+                return directory
+        except OSError:
+            break
+    return cwd
+
+
 def _mcp_registration_check(directory, timezone_name=None, vault=None, home=None, cwd=None):
-    """Read ~/.claude.json and ./.mcp.json only; never runs `claude` or writes its settings."""
+    """Read the Claude Code user settings and the project's .mcp.json only; never runs `claude` or writes its settings."""
     from .wizard import mcp_add_command
     fix = mcp_add_command(Path(directory).expanduser().absolute(), timezone_name, vault)
     try:
-        cwd = Path.cwd() if cwd is None else Path(cwd)
+        root = project_root(Path.cwd() if cwd is None else Path(cwd))
         config_dir = os.environ.get('CLAUDE_CONFIG_DIR')
         user_file = Path(config_dir)/'.claude.json' if config_dir else (Path.home() if home is None else Path(home))/'.claude.json'
     except (OSError, RuntimeError):
         return {'ok':False,'status':'warning','note':'Cannot locate the home directory to read Claude Code settings.','fix':fix}
+    keys = [str(root)] + ([root.as_posix()] if os.name == 'nt' else [])
+
+    def local(config):
+        projects = config.get('projects') or {}
+        return next((projects[k].get('mcpServers') for k in keys if isinstance(projects.get(k), dict)), None)
+
     found = []; unreadable = []
     # Claude Code's precedence: local, then project, then user scope.
-    for scope, path, servers in (('local', user_file, lambda c: (c.get('projects') or {}).get(str(cwd), {}).get('mcpServers')),
-                                 ('project', cwd/'.mcp.json', lambda c: c.get('mcpServers')),
+    for scope, path, servers in (('local', user_file, local),
+                                 ('project', root/'.mcp.json', lambda c: c.get('mcpServers')),
                                  ('user', user_file, lambda c: c.get('mcpServers'))):
         try:
             if not path.is_file():
@@ -123,19 +152,23 @@ def _mcp_registration_check(directory, timezone_name=None, vault=None, home=None
             continue
         if _registered(selected):
             found.append((scope, path, selected['work-copilot']))
+    checked = f'Checked project directory: {root}.'
     if not found:
-        note = 'No work-copilot MCP server registered for Claude Code (user scope or ./.mcp.json).'
+        note = f'No work-copilot MCP server registered for Claude Code (user scope, or local or project scope for this project). {checked}'
         if unreadable:
             note += ' Unreadable or invalid: '+', '.join(dict.fromkeys(unreadable))+'.'
-        return {'ok':False,'status':'warning','note':note,'fix':fix}
+        return {'ok':False,'status':'warning','project_dir':str(root),'note':note,'fix':fix}
     scope, path, entry = found[0]
-    result = {'ok':True,'status':'ok','scope':scope,'path':str(path),'note':f'Registered in Claude Code ({scope} scope); not started or contacted.'}
+    result = {'ok':True,'status':'ok','scope':scope,'path':str(path),'project_dir':str(root),'note':f'Registered in Claude Code ({scope} scope); not started or contacted. {checked}'}
     registered = _registered_data_dir(entry)
     if registered is None:
+        # Unset in the registration: the server inherits Claude Code's environment, else the default.
+        registered = os.environ.get('WORK_COPILOT_DATA_DIR')
+    if not registered:
         from .cli import default_data_dir
         registered = str(default_data_dir())
     if _same_path(registered, directory) is False:
-        result.update(ok=False,status='warning',registered_data_dir=registered,note=f'Registered ({scope} scope), but with another data directory: the agent and this checkout would see different state.',fix='claude mcp remove --scope '+scope+' work-copilot, then '+fix)
+        result.update(ok=False,status='warning',registered_data_dir=registered,note=f'Registered ({scope} scope), but with another data directory: the agent and this checkout would see different state. {checked}',fix='claude mcp remove --scope '+scope+' work-copilot, then '+fix)
     elif scope == 'project':
         result['note'] += ' Project-scoped servers need your approval when Claude Code asks.'
     return result
@@ -144,7 +177,7 @@ def _mcp_registration_check(directory, timezone_name=None, vault=None, home=None
 def overlay_check(directory, overlay=None):
     """Report the company overlay marker. KAN-381 adds `overlay apply`, which writes it."""
     path = Path(overlay) if overlay else Path(directory)/'overlay.json'
-    fix = 'work-copilot overlay apply <org.yaml> (coming in KAN-381)'
+    fix = 'An overlay is applied by `work-copilot overlay apply <org.yaml>` (KAN-381, not yet available).'
     try:
         if not path.exists():
             return {'ok':False,'status':'warning','state':'not_applied','note':'No company overlay applied; defaults are generic.','fix':fix}
