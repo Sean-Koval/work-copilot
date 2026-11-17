@@ -223,7 +223,8 @@ def test_import_refuses_a_stale_journal_and_leaves_nothing_on_failure(tmp_path):
     (tmp_path / 'broken.jsonl').write_text('\n'.join(json.dumps(item) for item in broken) + '\n', encoding='utf-8')
     with pytest.raises(ValueError, match='cannot open'):
         Store.import_jsonl(tmp_path / 'broken.jsonl', target)
-    assert sorted(p.name for p in target.parent.iterdir()) == ['copilot.db.init.lock']
+    # The init lock file stays on POSIX and is removed on Windows; no database or staging file may remain.
+    assert sorted(p.name for p in target.parent.iterdir() if p.name != 'copilot.db.init.lock') == []
     restored, _ = Store.import_jsonl(tmp_path / 'state.jsonl', target)
     assert restored.snapshot()['obligations']
 
