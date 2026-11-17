@@ -31,6 +31,9 @@ class ObligationInput(BaseModel):
     commitment: bool | None = None
     evidence_ids: list[str] | None = Field(default=None, description='Existing source IDs')
     body: str | None = Field(default=None, max_length=100000)
+    tracker: str | None = Field(default=None, description='Ticket key this follow-up is for, such as KAN-463 (the session join key)')
+    work_id: str | None = Field(default=None, description="ai-dlc work ID, from AI_DLC_WORK_ID")
+    session_key: str | None = Field(default=None, description='ai-dlc session key aidlc1:<tracker>:<work>:<session>, from AI_DLC_SESSION_KEY')
 
 
 class ObligationChanges(BaseModel):
@@ -80,7 +83,7 @@ def _brief_source(source):
 
 
 def _brief_obligation(obligation):
-    return {key:(obligation.get(key)[:300] if key in {'title','review_reason'} and isinstance(obligation.get(key),str) else obligation.get(key)) for key in ('id','revision','intent_key','title','project_id','owner','status','question_state','follow_up_at','due_at','waiting_on','freshness','review_reason')} | {key:obligation[key] for key in ('kind','review_kind','url','path','opened_at','age_hours','draft') if obligation.get(key) is not None} | {'evidence_ids':[s['id'] for s in obligation.get('evidence',[])[:1]],'evidence_total':len(obligation.get('evidence',[])),'evidence_truncated':len(obligation.get('evidence',[]))>1,'evidence_tool':'get_reply_context'}
+    return {key:(obligation.get(key)[:300] if key in {'title','review_reason'} and isinstance(obligation.get(key),str) else obligation.get(key)) for key in ('id','revision','intent_key','title','project_id','owner','status','question_state','follow_up_at','due_at','waiting_on','freshness','review_reason')} | {key:obligation[key] for key in ('tracker','work_id','session_key') if obligation.get(key)} | {key:obligation[key] for key in ('kind','review_kind','url','path','opened_at','age_hours','draft') if obligation.get(key) is not None} | {'evidence_ids':[s['id'] for s in obligation.get('evidence',[])[:1]],'evidence_total':len(obligation.get('evidence',[])),'evidence_truncated':len(obligation.get('evidence',[]))>1,'evidence_tool':'get_reply_context'}
 
 
 def _page(items, cursor, limit):

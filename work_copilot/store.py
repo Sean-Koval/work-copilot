@@ -12,6 +12,7 @@ from uuid import uuid4
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from filelock import FileLock
+from .join_key import FIELDS as JOIN_FIELDS, join_fields
 from .knowledge import ENVELOPE_VERSION, validate_envelope
 
 
@@ -553,13 +554,14 @@ class Store:
 
     def track_obligation(self, payload):
         """Create a local user-entered waiting/action record, never an external send."""
-        allowed={'intent_key','title','project_id','owner','status','waiting_on','follow_up_at','due_at','question_state','commitment','evidence_ids','body'}
+        allowed={'intent_key','title','project_id','owner','status','waiting_on','follow_up_at','due_at','question_state','commitment','evidence_ids','body',*JOIN_FIELDS}
         if not isinstance(payload,dict) or set(payload)-allowed or not all(isinstance(payload.get(k),str) and payload[k].strip() for k in ('intent_key','title')):
             raise ValueError('Structured obligation requires intent_key and title; unknown fields rejected')
         body=payload.get('body','')
         if not isinstance(body,str) or len(body)>100000:
             raise ValueError('Body must be text of at most 100000 characters')
-        candidate={k:v for k,v in payload.items() if k not in ('evidence_ids','body')}
+        join=join_fields(payload)
+        candidate={k:v for k,v in payload.items() if k not in ('evidence_ids','body',*JOIN_FIELDS)}
         candidate.setdefault('owner','me'); candidate.setdefault('status','waiting')
         self._validate_changes(candidate)
         ids=payload.get('evidence_ids',[])
@@ -582,11 +584,14 @@ class Store:
             existing=self.db.execute('SELECT id FROM obligations WHERE canonical=?',(canonical,)).fetchone()
             if existing:
                 return self._obligation(existing[0])
-            source={'id':'local/obligation/'+_id(canonical),'revision':'1','provider':'local-user','title':'User-entered obligation: '+candidate['title'],'body':'Explicitly entered by the local user. '+candidate['title']+('\n\n'+body if body else ''),'projects':[project] if project else [],'obligations':[candidate]}
+            session=('\n\nWork-Session: '+join['session_key']) if join else ''
+            source={'id':'local/obligation/'+_id(canonical),'revision':'1','provider':'local-user','title':'User-entered obligation: '+candidate['title'],'body':'Explicitly entered by the local user. '+candidate['title']+('\n\n'+body if body else '')+session,'join':join,'projects':[project] if project else [],'obligations':[candidate]}
             self.ingest([source],connector='local-user')
             oid=self.db.execute('SELECT id FROM obligations WHERE canonical=?',(canonical,)).fetchone()[0]
             for sid in ids:
                 self.db.execute('INSERT OR IGNORE INTO manual_evidence VALUES(?,?)',(oid,sid))
+            if join:
+                ob=self._obligation(oid); ob.update(join); self._put_obligation(ob)
             return self._obligation(oid)
 
     def sync_review_queue(self, items, connector='knowledge-review', observed_at=None):

@@ -71,4 +71,12 @@ Limits: 64 KiB events, 16,000-character summaries, 30 outcome strings, 30 eviden
 
 Optional `procedure_id`, `procedure_version`, and `step_id` are literal metadata references. They are recorded as **not executed or advanced**. Keep reusable procedures/skills in their source-controlled authoring location. Project stage/state requires current source evidence. Correction learnings remain proposed context until a future explicit learning-review lifecycle exists. This hook neither duplicates runbooks nor runs a DAG, advances stages, marks stakeholders informed, or edits skills.
 
+## Session join key
+
+A receipt can carry the ticket and ai-dlc work it belongs to, so flightdeck can join it to the session's trace. The fields are `tracker` (the ticket key, such as `KAN-463`), `work_id` and `session_key`, in ai-dlc's format `aidlc1:<tracker>:<work>:<session>` (ai-dlc's `docs/design/session-join-key.md`). Each part is letters, digits, dot, dash or underscore.
+
+When the event names none of them, `work-copilot activity` reads `AI_DLC_SESSION_KEY`, `AI_DLC_TRACKER_KEY`, `AI_DLC_WORK_ID` and `AI_DLC_SESSION_ID` from the session, as ai-dlc's session-start hook sets them. `--queue-only` reads them when it queues, so a later `drain-activity` keeps them. A malformed variable is skipped; a malformed field in the event is refused.
+
+The receipt's body gets a `Work-Session: <key>` line, and an exported Source record links to the ticket with `belongs_to`. The MCP `track_obligation` tool and the API take the same three fields for a follow-up. They record what the session said it was working on; nothing checks the ticket.
+
 An OS file lock permits only one drain at a time; another returns `busy: true` without touching events. The queued receipt is removed only after both source ingestion and the separate local refresh flag succeed. A simulated interruption between those operations is covered by a replay test: the source deduplicates and the flag is reasserted before removal. No network work is triggered by that repair.
