@@ -4,7 +4,16 @@ This is an early laptop prototype. **Python 3.11+ is required. Linux/Python 3.12
 
 ## 1. Install, then run the isolated check
 
-From a terminal with Git and Python installed:
+**One command, no clone.** With [uv](https://docs.astral.sh/uv/) (or pipx) and Git installed, on macOS, Windows or Linux:
+
+```sh
+uv tool install git+https://github.com/Sean-Koval/work-copilot
+work-copilot smoke
+```
+
+`pipx install git+https://github.com/Sean-Koval/work-copilot` works the same way. Upgrade with `uv tool upgrade work-copilot`. Then use `work-copilot` wherever this guide says `./run.sh`.
+
+**From a clone** (to read or change the code), from a terminal with Git and Python installed:
 
 ```sh
 git clone https://github.com/Sean-Koval/work-copilot.git
@@ -35,7 +44,15 @@ Check `py -3 --version` is 3.11 or newer first. macOS uses the shell commands ab
 
 Open **http://127.0.0.1:8765**. Review Today, This Week, project rooms/workstreams, waiting items, source passages and an offline reply draft. Copying or marking a local question sent does not send a message. Stop the service with Ctrl+C; restarting retains demo state.
 
-Demo state defaults to `~/.local/share/work-copilot-demo`; real state uses the separate `~/.local/share/work-copilot` (or the equivalent directories under `$XDG_DATA_HOME`). Neither belongs in the public checkout. To choose another private location, put `--data-dir` **before** the command:
+Demo state defaults to a `work-copilot-demo` folder; real state uses a separate `work-copilot` folder beside it:
+
+| OS | Folder |
+| --- | --- |
+| Windows | `%LOCALAPPDATA%` (usually `C:\Users\you\AppData\Local`) |
+| macOS | `~/Library/Application Support` |
+| Linux | `~/.local/share` |
+
+`$XDG_DATA_HOME` wins on any OS when set. On macOS and Windows, a folder that an earlier version left in `~/.local/share` keeps being used, and `doctor` reports it as `data_dir_note`; nothing is moved. Neither folder belongs in the public checkout. To choose another private location, put `--data-dir` **before** the command:
 
 ```sh
 ./run.sh --data-dir /absolute/private/copilot-demo demo

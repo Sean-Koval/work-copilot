@@ -12,12 +12,15 @@ Use the localhost dashboard to see what needs you; keep Claude or Antigravity fo
 
 Requires Python 3.11+ and internet access for the first dependency installation.
 
+Install the command once, with no clone (macOS, Windows or Linux; [uv](https://docs.astral.sh/uv/) or pipx):
+
 ```sh
-git clone https://github.com/Sean-Koval/work-copilot.git
-cd work-copilot
-./run.sh smoke   # isolated fictional-data check
-./run.sh         # open the persistent demo
+uv tool install git+https://github.com/Sean-Koval/work-copilot   # or: pipx install git+https://github.com/Sean-Koval/work-copilot
+work-copilot smoke   # isolated fictional-data check
+work-copilot demo    # open the persistent demo
 ```
+
+Or work from a clone: `./run.sh smoke`, then `./run.sh` (it installs into the checkout's `.venv`).
 
 Open **http://127.0.0.1:8765**. Stop with Ctrl+C. Restarting keeps the demo state. No login service is installed.
 
@@ -51,7 +54,7 @@ Choose an approved, dedicated **work-only Markdown folder**, not your whole pers
 
 For a practical morning-to-evening routine, read [Daily workflow](docs/DAILY_WORKFLOW.md).
 
-Demo storage and real storage are separate by default: `~/.local/share/work-copilot-demo` and `~/.local/share/work-copilot` (under `$XDG_DATA_HOME` when set). Use `--data-dir` **before** the command to select another private location. Never put real data in a public checkout or sync a live SQLite database.
+Demo storage and real storage are separate by default: `work-copilot-demo` and `work-copilot` in `%LOCALAPPDATA%` on Windows, `~/Library/Application Support` on macOS and `~/.local/share` on Linux (`$XDG_DATA_HOME` wins when set). A macOS or Windows folder already in `~/.local/share` from an earlier version keeps being used; `doctor` says so. Use `--data-dir` **before** the command to select another private location. Never put real data in a public checkout or sync a live SQLite database.
 
 ## Your notes remain yours
 

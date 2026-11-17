@@ -12,7 +12,7 @@ First pass [Getting started](GETTING_STARTED.md) and `./run.sh smoke`. Then choo
 | Timezone | `America/New_York` | Dashboard and MCP `--timezone` |
 | Approved work-only Markdown folder | `/absolute/work-vault` | Dashboard `--vault`; MCP environment `WORK_COPILOT_VAULT` |
 
-Replace placeholders with your own absolute paths. The Python executable is the one installed by this checkout: `/absolute/work-copilot/.venv/bin/python` on Linux/macOS or `.venv\Scripts\python.exe` on Windows. Windows execution remains unverified here. Do not put secrets or real work paths in a public repository.
+Replace placeholders with your own absolute paths. The Python executable is the one installed by this checkout: `/absolute/work-copilot/.venv/bin/python` on Linux/macOS or `.venv\Scripts\python.exe` on Windows. With the one-command install (`uv tool install`), use the `work-copilot` command instead, with its absolute path from `which work-copilot` (`where work-copilot` on Windows), and drop `-m work_copilot`. Windows execution remains unverified here. Do not put secrets or real work paths in a public repository.
 
 ## Codex CLI
 
