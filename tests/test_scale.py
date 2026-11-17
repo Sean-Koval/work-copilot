@@ -33,6 +33,7 @@ def test_reopen_does_not_rebuild_projections(populated, monkeypatch):
     _forbid(monkeypatch, '_rebuild_all_projections', 'list_sources')
     store = Store(populated / 'copilot.db')
     assert store.search('Thread 17')
+    store.close()
 
 
 def test_get_attention_reads_no_source_ledger(populated, monkeypatch):
@@ -43,6 +44,7 @@ def test_get_attention_reads_no_source_ledger(populated, monkeypatch):
     data = json.loads(server._tool_manager.get_tool('get_attention').fn(limit=5))
     assert data['page']['total'] == 20 and len(data['obligations']) == 5
     assert data['page']['next_cursor'] == 5
+    server.work_copilot_store.close()
 
 
 def test_projection_version_change_rebuilds_once(populated, monkeypatch):
