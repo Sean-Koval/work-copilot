@@ -109,6 +109,9 @@ def migrate(db, database_path=None, target=None) -> dict:
         db.execute('BEGIN IMMEDIATE')
         try:
             MIGRATIONS[step](db)
+            # Projections are derived from the old schema: mark them for a rebuild in the same
+            # transaction, so a crash before the rebuild cannot leave them stale (KAN-388).
+            db.execute(STALE_PROJECTIONS)
             db.execute(f'PRAGMA user_version={step + 1}')
         except BaseException:
             db.rollback()
@@ -146,6 +149,10 @@ def export_jsonl(db, destination, exported_at) -> dict:
         raise
     return {'path': str(destination), 'schema_version': header['schema_version'], 'rows': counts}
 
+
+# Marks search and project links for a rebuild on the next open (KAN-388). An update, not a
+# delete, so the row keeps its place and a re-export lists rows in the same order.
+STALE_PROJECTIONS = """UPDATE local_metadata SET payload='{"version": null}' WHERE key='projections'"""
 
 SIDECARS = ('-wal', '-shm', '-journal')
 
@@ -205,6 +212,8 @@ def import_jsonl(source, database_path) -> dict:
                 counts[table] += 1
             if expected != counts:
                 raise ValueError('Export is incomplete: row counts differ from its header')
+            # Projections are not exported, so the first open must build them.
+            db.execute(STALE_PROJECTIONS)
             db.commit()
             migrated = migrate(db, None)
         finally:
