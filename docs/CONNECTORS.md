@@ -76,6 +76,10 @@ The intent key alone is an obligation's identity. Two sources that carry the sam
 
 Ingest refuses any other id or key, and an id whose provider differs from `provider`. It then writes nothing from that batch. Sources and obligations stored before these rules keep their ids and their `(project_id, intent_key)` identity.
 
+Upgrading keeps the records you reviewed. A vault note, a review-queue item or a tracked ask met again finds the obligation it made before, so a dismissal or an edit stays. When the same ask arrives under another project, the record keeps its project and is sent to review with a `review_reason`.
+
+Sources in an old id format are not migrated. A demo seeded before, an old activity id or a remote source without `id_prefix` stays in the ledger as it was. Its new copy is a separate source beside it. To start clean, seed the demo into a fresh data directory.
+
 A connector capability/config record should state:
 
 - Transport, verified tool names and normalized read-result schema; no guessed Symphony OBO tool contract.
@@ -135,6 +139,6 @@ For “Waiting on Alex for the Atlas transcript; follow up tomorrow,” your age
 {"intent_key":"atlas-transcript","title":"Get Atlas transcript","project_id":"atlas","status":"waiting","waiting_on":"Alex","follow_up_at":"2026-10-27","owner":"me","question_state":"pending"}
 ```
 
-`intent_key` may be a bare ask kind, as here, for an ask you track by hand. It is stored as `local-user:local:tracked:atlas-transcript`, so tracking it again returns the same record. A full intent key ties the record to an ask a source already carries.
+`intent_key` may be a bare ask kind, as here, for an ask you track by hand. It is stored as `local-user:local:tracked:atlas-transcript`, so tracking it again returns the same record, even one tracked before this format. Tracking it again for another project returns that record with a `review_reason` and leaves its project as it was. A full intent key ties the record to an ask a source already carries.
 
 The service validates fields and persists the local record; it does not pretend to parse free-form natural language. `follow_up_at` is a personal reminder, distinct from a source-backed `due_at` promise. An unresolved person's display name is not recipient identity verification. Reviewing a record can change its local state but cannot approve a draft or authorize an external action. There are no approve, send, edit-original-source or OS-configuration tools. The stdio server has no exposed network port; protect the process account and local database. These tools provide context to your existing authoring workspace; they do not replace it. The implementation pins the SDK v1 compatibility line (`mcp<2`); see the [official v1 SDK documentation](https://py.sdk.modelcontextprotocol.io/v1/).

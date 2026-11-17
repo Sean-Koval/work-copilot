@@ -76,7 +76,9 @@ The default result envelope is `{ "items": [normalized_sources], "next_cursor": 
 }
 ```
 
-Ingest accepts only source ids of the form `provider:site:object` (see [CONNECTORS.md](CONNECTORS.md#ids-and-intent-keys)). When the server's ids lack the provider and tenant, set `mapping.id_prefix` to `provider:site:`. Each mapped item's id is then the prefix followed by the server's id: with the prefix above, `room-7/msg-42` becomes `symphony:acme-tenant:room-7/msg-42`. `load_config` refuses a prefix of any other form, and ingest refuses an item whose id names another provider than its `provider` constant.
+Ingest accepts only source ids of the form `provider:site:object` (see [CONNECTORS.md](CONNECTORS.md#ids-and-intent-keys)). When the server's ids lack the provider and tenant, set `mapping.id_prefix` to `provider:site:`. Each mapped item's id is then the prefix followed by the server's id: with the prefix above, `room-7/msg-42` becomes `symphony:acme-tenant:room-7/msg-42`. An id that already starts with the prefix is left alone. `load_config` refuses a prefix of any other form, or one whose provider is not `constants.provider`. Ingest refuses an item whose id names another provider than its `provider` constant.
+
+The prefix also completes an item's asks. An obligation whose `intent_key` is a bare ask kind, such as `reply`, becomes an ask from that item: `symphony:acme-tenant:room-7/msg-42:reply`. A full intent key is kept as given.
 
 This mapping is deliberately simple: no code evaluation, no model, no automatic schema guessing. You must ensure the server's id is stable within the tenant, and revision is meaningful. Nested arrays, other ID composition and domain-specific ownership/intent extraction may require an administrator-reviewed adapter or normalized JSON import. A room mention is not user ownership. Many rooms and many projects can be linked through the normalized source contract.
 

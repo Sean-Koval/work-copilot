@@ -148,7 +148,9 @@ def _capture_vault_unlocked(store, root) -> dict:
                 if not ids:
                     obligations = [*obligations, {'intent_key': f'{sid}:map', 'title': f'Review project mapping: {relative}{suggestion_note}', 'owner': None, 'status': 'candidate'}]
                 content_hash = hashlib.sha256(raw).hexdigest()
-                extraction_hash = hashlib.sha256(json.dumps([(p['id'],p.get('name')) for p in suggestions]).encode()).hexdigest()
+                # Derived obligations are part of the extraction: when the way they are derived changes
+                # (KAN-392 turned a bare kind into <sid>:<kind>), an unchanged note gets a new revision.
+                extraction_hash = hashlib.sha256(json.dumps([[(p['id'],p.get('name')) for p in suggestions], obligations], sort_keys=True).encode()).hexdigest()
                 previous = prior.get(sid, {})
                 if previous.get('content_hash') == content_hash and previous.get('extraction_hash') == extraction_hash and not previous.get('deleted'):
                     revision = previous['revision']

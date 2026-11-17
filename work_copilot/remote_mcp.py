@@ -26,7 +26,7 @@ from mcp.client.auth import OAuthClientProvider
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata, OAuthToken, OAuthMetadata
 
-from .ids import SOURCE_ID
+from .ids import ASK_KIND, SOURCE_ID
 
 
 class _RedactOAuthLog(logging.Filter):
@@ -269,6 +269,9 @@ def load_config(path):
         # provider:site: so a mapped item id becomes provider:site:<the item's id>.
         if not isinstance(prefix, str) or not prefix.endswith(':') or not SOURCE_ID.fullmatch(prefix + 'x'):
             raise ValueError('mapping.id_prefix must be provider:site: (for example symphony:acme-tenant:)')
+        provider = mapping.get('constants', {}).get('provider')
+        if provider is not None and prefix.split(':', 1)[0] != provider:
+            raise ValueError('mapping.id_prefix must start with mapping.constants.provider (' + str(provider) + ':)')
     return config
 
 
@@ -406,6 +409,20 @@ def _path(obj, path, default=None):
     return obj
 
 
+def _prefixed(item, prefix):
+    """Prefix the item's id, and turn each bare ask kind into ``<the prefixed id>:<kind>``."""
+    if not isinstance(item.get('id'), (str, int)) or isinstance(item.get('id'), bool):
+        return item
+    raw = str(item['id'])
+    # An id the server already gives in full is not prefixed twice.
+    sid = raw if raw.startswith(prefix) else prefix + raw
+    item = {**item, 'id': sid}
+    obligations = item.get('obligations')
+    if isinstance(obligations, list):
+        item['obligations'] = [{**o, 'intent_key': f"{sid}:{o['intent_key']}"} if isinstance(o, dict) and isinstance(o.get('intent_key'), str) and ASK_KIND.fullmatch(o['intent_key']) else o for o in obligations]
+    return item
+
+
 def normalize_result(payload, mapping):
     items = _path(payload, mapping.get('items_path','items'))
     if not isinstance(items, list) or len(items) > 10000:
@@ -417,7 +434,7 @@ def normalize_result(payload, mapping):
         raise ValueError('Source items must be objects')
     prefix = mapping.get('id_prefix')
     if prefix:
-        items = [{**item, 'id': prefix + str(item['id'])} if isinstance(item.get('id'), (str, int)) and not isinstance(item.get('id'), bool) else item for item in items]
+        items = [_prefixed(item, prefix) for item in items]
     return items, _path(payload,mapping.get('next_cursor_path','next_cursor')), _path(payload,mapping.get('checkpoint_path','checkpoint'))
 
 
