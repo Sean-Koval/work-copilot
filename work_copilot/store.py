@@ -67,6 +67,8 @@ class Store:
         self.db.execute('PRAGMA foreign_keys=ON')
         # Ordered migrations, with a backup first when the database already holds data.
         self.migration=schema.migrate(self.db,self.path)
+        # Backups hold captured text; keep none past the retention limit.
+        schema.prune_backups(self.path)
         # Serialize projection rebuild across UI/MCP startup.
         self.db.execute('BEGIN IMMEDIATE')
         # Rebuildable projection; migration also indexes pre-search databases.
