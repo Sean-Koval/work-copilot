@@ -86,8 +86,13 @@ def backups(database_path) -> list:
     return sorted(folder.glob(f'{stem}-schema-v*-*.db'), key=lambda path: path.name.rsplit('-', 1)[-1]) if folder.is_dir() else []
 
 
-def prune_backups(database_path, max_age_days=BACKUP_MAX_AGE_DAYS, now=None) -> list:
-    """Delete schema backups older than ``max_age_days``; returns the removed paths."""
+def prune_backups(database_path, max_age_days=BACKUP_MAX_AGE_DAYS, now=None, dry_run=False) -> list:
+    """Delete schema backups older than ``max_age_days``; returns their paths.
+
+    With ``dry_run`` nothing is deleted, so the caller can remove each one and report a
+    file it could not remove. A file it can't remove now (Windows holds open files) is left
+    and tried again next time.
+    """
     now = now or datetime.now(timezone.utc)
     removed = []
     for path in backups(database_path):
@@ -96,7 +101,11 @@ def prune_backups(database_path, max_age_days=BACKUP_MAX_AGE_DAYS, now=None) -> 
         except ValueError:
             continue
         if (now - taken).days >= max_age_days:
-            path.unlink(missing_ok=True)
+            if not dry_run:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    continue
             removed.append(str(path))
     return removed
 

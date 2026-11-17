@@ -287,10 +287,14 @@ def capture_settings(config):
     return capture if capture and (capture['rooms'] or capture['spaces']) else None
 
 
-def select_captured(items, capture):
-    """Keep items from picked Symphony rooms (``room_id``) or Confluence spaces (``space_key``) only (KAN-390)."""
+def select_captured(items, capture, known=lambda source_id: False):
+    """Keep items from picked Symphony rooms (``room_id``) or Confluence spaces (``space_key``) only (KAN-390).
+
+    An item for a source already stored is kept too, whatever it carries: a deletion marker
+    or an edit may come without its room, and dropping it would keep stale text.
+    """
     rooms, spaces = set(capture['rooms']), set(capture['spaces'])
-    kept = [item for item in items if item.get('room_id') in rooms or item.get('space_key') in spaces]
+    kept = [item for item in items if item.get('room_id') in rooms or item.get('space_key') in spaces or known(item.get('id'))]
     return kept, len(items) - len(kept)
 
 
@@ -457,6 +461,12 @@ async def _run_unlocked(store, config_path, data_dir, authorize, collect):
     if collect and capture is None:
         raise ValueError(CAPTURE_REQUIRED)
     store.configure_connector(name, ['remote_mcp_http', 'oauth_pkce', 'explicit_read_allowlist', 'bounded_pagination', 'picked_rooms_and_spaces', 'retention_limit'], 'Configured remote MCP; company-specific schema and coverage require verification. No cached ACL revocation; text is kept for the configured retention limit. Discovery alone does not imply source coverage.')
+    retention = None
+    if capture is not None:
+        # Expire text past the limit on every run, before connecting, so a run that fails
+        # or only discovers tools still applies it (KAN-390).
+        store.set_retention(name, capture['retention_days'])
+        retention = store.apply_retention(name, capture['retention_days'])
     store.set_connector(name, 'catching_up')
     try:
         async with remote_session(config,data_dir,authorize) as session:
@@ -500,7 +510,7 @@ async def _run_unlocked(store, config_path, data_dir, authorize, collect):
                 seen.add(str(cursor)); arguments[config['cursor_argument']]=cursor
             else:
                 raise ValueError('Page limit reached; nothing committed, narrow scope or increase max_pages')
-            kept, skipped = select_captured(all_items, capture)
+            kept, skipped = select_captured(all_items, capture, known=store.has_source)
             store.ingest(kept, connector=name, checkpoint=final_checkpoint)
             retention = store.apply_retention(name, capture['retention_days'])
             store.set_connector(name,'healthy')

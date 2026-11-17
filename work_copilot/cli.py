@@ -63,7 +63,7 @@ def _run():
             p.add_argument('file',type=Path,nargs='?',help='Normalized JSON envelope or source array')
             p.add_argument('--jsonl',type=Path,help='Restore a JSONL export into an empty --data-dir')
         elif name=='forget':
-            p.add_argument('--source',required=True,help='Id of the source to remove with all its text, including from backups/')
+            p.add_argument('--source',required=True,help='Id of the source whose text to remove from the database and backups/ (not from exports or the wiki)')
         elif name in {'connect','collect'}:
             p.add_argument('--config',type=Path,required=True)
             p.add_argument('--authorize',action='store_true',help='Explicitly initiate OAuth in browser; only approved company server')

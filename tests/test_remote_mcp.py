@@ -163,7 +163,7 @@ async def test_real_http_mcp_oauth_discovery_collect_restart(tmp_path, monkeypat
         store.close(); store=Store(tmp_path/'copilot.db')
         result=await remote_collect(store,config,tmp_path,False)
         assert result['items']==1 and result['skipped_not_picked']==1 and [s['id'] for s in store.list_sources()]==['fictional:room:1']
-        assert result['retention']=={'expired_bodies':0,'redacted_revisions':0,'backups_removed':0}
+        assert {k:result['retention'][k] for k in ('expired_bodies','redacted_revisions','backups_removed','wal_cleared')}=={'expired_bodies':0,'redacted_revisions':0,'backups_removed':0,'wal_cleared':True}
         assert store.snapshot()['connectors'][0]['checkpoint']=='1'
         obligation=store.snapshot()['obligations'][0]
         store.set_connector('remote-mcp','auth_expired')
