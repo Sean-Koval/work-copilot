@@ -196,6 +196,29 @@ def overlay_check(directory, overlay=None):
     return {'ok':False,'status':'warning','state':'invalid','path':str(path),'note':'Overlay marker lacks name or applied_at.','fix':fix}
 
 
+def rules_check(directory):
+    """Read the team rules.json beside the database without changing it; the store refuses to open on a bad one."""
+    path = Path(directory)/'rules.json'
+    if not path.exists():
+        return {'ok':True,'status':'ok','state':'defaults','note':'No rules.json; the built-in draft rules apply.'}
+    try:
+        if path.is_symlink():
+            raise ValueError('rules.json is a symlink')
+        try:
+            from .rules import Rules
+        except ImportError:
+            Rules = None
+        if Rules is not None and hasattr(Rules, 'load'):
+            Rules.load(Path(directory))
+        else:
+            data = json.loads(path.read_text(encoding='utf-8-sig'))
+            if not isinstance(data, dict):
+                raise ValueError('rules.json must be a JSON object')
+    except (OSError, ValueError, RecursionError) as exc:
+        return {'ok':False,'status':'error','state':'invalid','path':str(path),'note':f'Team rules are invalid, so the dashboard and MCP server will not start: {exc}','fix':'Fix or remove rules.json, then run doctor again.'}
+    return {'ok':True,'status':'ok','state':'custom','path':str(path),'note':'Team rules.json read and valid.'}
+
+
 def _database_details(db):
     integrity=db.execute('PRAGMA quick_check').fetchone()[0]
     connectors=[json.loads(row[0]) for row in db.execute('SELECT payload FROM connectors')]
@@ -212,6 +235,7 @@ def _result(directory, database, connectors, projects, timezone_name, vault, con
         'connector':{'ok':False,'status':'not_configured','note':'Pass --config to inspect a private OAuth configuration offline.'},
         'projects':{'ok':projects>0,'count':projects,'next_step':'Create your first project with init --wizard, the dashboard or the create_project MCP tool.' if not projects else 'Project identities configured.'},
         'overlay':overlay_check(directory),
+        'rules':rules_check(directory),
     }
     if vault:
         checks['vault_sync']=_vault_sync_check(vault)

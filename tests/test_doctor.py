@@ -254,3 +254,15 @@ def test_doctor_mcp_registration_local_scope_keyed_at_git_root(tmp_path, monkeyp
     (home/'.claude.json').unlink();(repo/'.mcp.json').write_text(json.dumps({'mcpServers':{'work-copilot':entry}}))
     project=_mcp_registration_check(tmp_path/'data','UTC',home=home,cwd=sub)
     assert project['scope']=='project' and project['path']==str(repo/'.mcp.json')
+
+
+def test_doctor_rules_check(tmp_path):
+    from work_copilot.doctor import rules_check
+    assert rules_check(tmp_path)['state']=='defaults'
+    (tmp_path/'rules.json').write_text('{}',encoding='utf-8')
+    assert rules_check(tmp_path)['state']=='custom'
+    (tmp_path/'rules.json').write_text('{not json',encoding='utf-8')
+    bad=rules_check(tmp_path)
+    assert bad['state']=='invalid' and not bad['ok'] and 'rules.json' in bad['path']
+    (tmp_path/'rules.json').write_text('[]',encoding='utf-8')
+    assert rules_check(tmp_path)['state']=='invalid'
