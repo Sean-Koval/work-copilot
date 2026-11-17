@@ -293,6 +293,8 @@ class Store:
                         self.db.execute('INSERT OR IGNORE INTO projects VALUES(?,?)',(project['id'],project.get('name',project['id'])))
                         self.db.execute('INSERT OR IGNORE INTO source_projects VALUES(?,?,?)',(source['id'],project['id'],project.get('workstream','')))
                     for candidate in source['obligations']:
+                        if 'owner' in candidate:
+                            candidate={**candidate,'owner':self.rules.owner(candidate['owner'])}
                         canonical=_json([candidate.get('project_id'),candidate['intent_key']])
                         existing_row=self.db.execute('SELECT obligation_id FROM source_intents WHERE source_id=? AND candidate_key=?',(source['id'],canonical)).fetchone()
                         if not existing_row:
@@ -355,6 +357,8 @@ class Store:
         if not isinstance(changes,dict) or not changes or set(changes)-allowed:
             raise ValueError('Unsupported review fields')
         self._validate_changes(changes)
+        if 'owner' in changes:
+            changes={**changes,'owner':self.rules.owner(changes['owner'])}
         with self._transaction():
             ob=self._obligation(id)
             if ob['revision'] != revision:
@@ -447,8 +451,13 @@ class Store:
             direct={s['id'] for s in ob['evidence']}
             evidence.sort(key=lambda source:(source['id'] not in direct,source['id']))
             evidence=self.rules.order_evidence(ob,evidence)
-            lines=self.rules.reply(ob)
-            if lines is None:
+            canned=self.rules.reply(ob)
+            rule_name=None
+            if canned:
+                # Rule text is not evidence; say where it came from.
+                rule_name,lines=canned
+                gaps.append(f'This text comes from the team rule {rule_name}, not from the evidence listed.')
+            else:
                 lines=[]
                 for index,source in enumerate(evidence[:2],1):
                     excerpt=source['body'].strip().replace('\n',' ')[:220]
@@ -462,7 +471,7 @@ class Store:
             did='draft-'+id
             prior=self.db.execute('SELECT payload FROM drafts WHERE id=?',(did,)).fetchone()
             revision=json.loads(prior[0])['revision']+1 if prior else 1
-            draft={'id':did,'obligation_id':id,'text':'\n\n'.join(lines),'revision':revision,'mode':'offline_template','stale':freshness!='observed','evidence':evidence,'gaps':gaps,'reviewed':False,'source_revisions':{s['id']:s.get('mapping_revision',s['revision']) for s in evidence},'obligation_revision':ob['revision'],'created_at':self.now().isoformat()}
+            draft={'id':did,'obligation_id':id,'text':'\n\n'.join(lines),'revision':revision,'mode':'offline_template','rule':rule_name,'stale':freshness!='observed','evidence':evidence,'gaps':gaps,'reviewed':False,'source_revisions':{s['id']:s.get('mapping_revision',s['revision']) for s in evidence},'obligation_revision':ob['revision'],'created_at':self.now().isoformat()}
             self.db.execute('INSERT OR REPLACE INTO drafts VALUES(?,?)',(did,_json(draft)))
             return draft
 
@@ -550,6 +559,7 @@ class Store:
             raise ValueError('Body must be text of at most 100000 characters')
         candidate={k:v for k,v in payload.items() if k not in ('evidence_ids','body')}
         candidate.setdefault('owner',self.rules.self_owner); candidate.setdefault('status','waiting')
+        candidate['owner']=self.rules.owner(candidate['owner'])
         self._validate_changes(candidate)
         ids=payload.get('evidence_ids',[])
         if not isinstance(ids,list) or not all(isinstance(sid,str) for sid in ids):
