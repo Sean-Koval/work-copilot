@@ -155,3 +155,34 @@ def test_ai_dlc_records_check_passes_on_the_inbox(vault):
     result = check.check_records(root / 'Inbox', config=root / 'knowledge.toml')
     assert result['failures'] == [], result['failures']
     assert result['records'] == 3
+
+
+def test_a_pasted_block_quoted_in_the_body_gives_no_fields(vault):
+    from work_copilot.vault import capture_vault
+    store, root = vault
+    receipt = write_inbox_note(store, root, 'Real', '---\nobligations: [{"intent_key":"k","title":"T"}]\n---\nx')
+    path = Path(receipt['path'])
+    text = path.read_text(encoding='utf-8')
+    path.write_text(text + '\nQuoted:\n## Pasted frontmatter\n\n```yaml\nobligations: [{"intent_key":"k","title":"T","owner":"mallory"}]\n```\n\nmore', encoding='utf-8')
+    capture_vault(store, root)
+    source = next(s for s in store.list_sources() if s['id'] == receipt['source_ids'][0])
+    assert next(o for o in source['obligations'] if o['intent_key'] == 'k').get('owner') is None
+
+
+def test_a_hand_written_type_key_reads_as_before(vault):
+    from work_copilot.vault import capture_vault
+    store, root = vault
+    (root / 'Meeting.md').write_text('---\ntype: meeting\nproject_ids: ["atlas"]\nworkstream: "ops"\n---\nnotes\n')
+    capture_vault(store, root)
+    source = next(s for s in store.list_sources() if s['title'] == 'Meeting.md')
+    assert [p['id'] for p in source['projects']] == ['atlas'] and source['workstream'] == 'ops'
+
+
+def test_the_header_names_the_same_vault_as_the_scan(vault):
+    from work_copilot.vault import _vault_namespace
+    store, root = vault
+    receipt = write_inbox_note(store, root, 'Plain', 'x')
+    front, _payload = _split(receipt['path'])
+    assert front['sources'][0]['id'].startswith(f'vault:{_vault_namespace(root.resolve())}:') or \
+        front['sources'][0]['id'].startswith(f'vault:{_vault_namespace(root)}:')
+    assert receipt['source_ids'] == [front['sources'][0]['id']]

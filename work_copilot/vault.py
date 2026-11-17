@@ -69,6 +69,12 @@ def _read(root: Path, relative: Path) -> bytes:
     return data
 
 
+def _vault_namespace(root: Path) -> str:
+    """The vault's id in source ids (``vault:<namespace>:<path>``): the one place it is made, so a scan and a
+    captured note's record header always agree (KAN-391 replaces the path hash with a stable id)."""
+    return hashlib.sha256(str(root).encode()).hexdigest()[:20]
+
+
 def _metadata(text: str) -> dict:
     """Read ``project_ids``, ``workstream`` and ``obligations`` from a note's frontmatter.
 
@@ -133,7 +139,10 @@ def _pasted_block(text: str) -> str | None:
         return None
     start += len(_PASTED)
     end = text.find('\n```\n', start)
-    return text[start:end + 1] if end >= 0 else None
+    # capture_note writes the block last; one anywhere else is body text (often someone else's) and gives nothing
+    if end < 0 or text[end + len('\n```\n'):].strip():
+        return None
+    return text[start:end + 1]
 
 
 def _sources(store):
@@ -149,7 +158,7 @@ def capture_vault(store, root) -> dict:
 
 def _capture_vault_unlocked(store, root) -> dict:
     root = _root(root)
-    namespace = hashlib.sha256(str(root).encode()).hexdigest()[:20]
+    namespace = _vault_namespace(root)
     prefix = f'vault:{namespace}:'
     connector = f'vault:{namespace}'
     prior = {s['id']: s for s in _sources(store) if s['id'].startswith(prefix)}
@@ -360,8 +369,7 @@ def _write_inbox_note_unlocked(store, root, title: str, body: str, project_ids: 
     inbox.mkdir(exist_ok=True)
     moment = datetime.now(timezone.utc)
     name = moment.strftime('%Y-%m-%d-') + uuid.uuid4().hex + '.md'
-    namespace = hashlib.sha256(str(root).encode()).hexdigest()[:20]
-    source_id = f'vault:{namespace}:Inbox/{name}'
+    source_id = f'vault:{_vault_namespace(root)}:Inbox/{name}'
     payload = f'\n# {title}\n\n{rest.strip(chr(10))}\n'
     if pasted is not None and pasted.strip():
         payload += _PASTED + pasted.rstrip('\n') + '\n```\n'
