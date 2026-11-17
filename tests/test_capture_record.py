@@ -97,3 +97,61 @@ def test_ai_dlc_knowledge_check_passes_on_captured_notes(vault):
     result = notes.check_vault(root)
     assert result['status'] == 'valid', result['invalid']
     assert result['valid'] == 3 and result['deprecated'] == [] and result['legacy'] == []
+
+
+def test_pasted_fields_the_header_cannot_hold_reach_the_store(vault):
+    store, root = vault
+    body = ('---\nproject_ids: ["atlas", "beacon"]\n'
+            'obligations: [{"intent_key":"r1","title":"Ship","owner":"me","due_at":"2026-12-01T00:00:00+00:00",'
+            '"project_id":"atlas","status":"open"}]\n---\nx')
+    receipt = write_inbox_note(store, root, 'Pasted', body)
+    source = next(s for s in store.list_sources() if s['id'] == receipt['source_ids'][0])
+    held = next(o for o in source['obligations'] if o['intent_key'] == 'r1')
+    assert (held['owner'], held['due_at'], held['project_id']) == ('me', '2026-12-01T00:00:00+00:00', 'atlas')
+
+
+def test_a_bad_record_note_is_one_scan_error_not_a_crash(vault):
+    from work_copilot.vault import capture_vault
+    store, root = vault
+    (root / 'Hand.md').write_text('---\ntype: meeting\nproject_ids: null\nobligations: [{"intent_key":"k","title":"T"}]\n---\nhi\n')
+    (root / 'Other.md').write_text('---\nproject_ids: ["atlas"]\n---\nok\n')
+    capture_vault(store, root)
+    assert any(s['title'] == 'Other.md' for s in store.list_sources())
+
+
+def test_crlf_text_and_control_characters_still_check(vault):
+    store, root = vault
+    receipt = write_inbox_note(store, root, 'Hi\x7fthere\x9b', 'text\r\nmore\r\n')
+    front, payload = _split(receipt['path'])
+    assert record_errors(Path(receipt['path'])) == []
+    assert front['title'] == 'Hi\x7fthere\x9b'
+    assert '\r' not in payload
+    assert front['revision'] == 'sha256:' + hashlib.sha256(payload.encode('utf-8')).hexdigest()
+
+
+def test_a_markdown_rule_is_not_taken_as_frontmatter(vault):
+    store, root = vault
+    receipt = write_inbox_note(store, root, 'Rule', '---\nIntro para\n---\nMore')
+    _front, payload = _split(receipt['path'])
+    assert payload.index('Intro para') < payload.index('More')
+    assert 'Pasted frontmatter' not in payload
+
+
+def test_a_null_status_is_left_out(vault):
+    store, root = vault
+    receipt = write_inbox_note(store, root, 'Null', '---\nobligations: [{"intent_key":"k","title":"T","status":null}]\n---\nx')
+    front, _payload = _split(receipt['path'])
+    assert front['obligations'] == [{'intent_key': 'k', 'title': 'T'}]
+
+
+def test_ai_dlc_records_check_passes_on_the_inbox(vault):
+    """ai-dlc's records check reads the Inbox itself and checks each body's hash."""
+    check = pytest.importorskip('ai_dlc.documentation.knowledge_check')
+    store, root = vault
+    write_inbox_note(store, root, 'Plain', 'Text only.')
+    write_inbox_note(store, root, 'Windows', 'line one\r\nline two\r\n')
+    write_inbox_note(store, root, 'Pasted', '---\nproject_ids: ["atlas"]\nobligations: [{"intent_key":"k","title":"T"}]\n---\nBody')
+    (root / 'knowledge.toml').write_text('[format]\nversion = 1\n')
+    result = check.check_records(root / 'Inbox', config=root / 'knowledge.toml')
+    assert result['failures'] == [], result['failures']
+    assert result['records'] == 3

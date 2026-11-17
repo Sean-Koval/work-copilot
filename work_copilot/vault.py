@@ -106,9 +106,34 @@ def _metadata(text: str) -> dict:
         if named:
             result['workstream'] = named[0]
     obligations = result.get('obligations')
-    if isinstance(obligations, list) and len(result['project_ids']) == 1:
-        result['obligations'] = [{**o, 'project_id': result['project_ids'][0]} if isinstance(o, dict) and 'project_id' not in o else o for o in obligations]
+    if isinstance(obligations, list):
+        # The record header holds only the contract's obligation fields; capture_note keeps
+        # the rest in the body's pasted block, so they are restored on every scan.
+        pasted = _pasted_block(text)
+        extra = _metadata('---\n' + pasted + '---\n').get('obligations') if pasted is not None else None
+        by_key = {o['intent_key']: o for o in extra or [] if isinstance(o, dict) and isinstance(o.get('intent_key'), str)} \
+            if isinstance(extra, list) else {}
+        obligations = [{**{k: v for k, v in by_key[o['intent_key']].items() if not (k == 'status' and v is None)}, **o} if isinstance(o, dict) and o.get('intent_key') in by_key else o
+                       for o in obligations]
+        projects = result.get('project_ids')
+        if isinstance(projects, list) and len(projects) == 1:
+            obligations = [{**o, 'project_id': projects[0]} if isinstance(o, dict) and o.get('project_id') is None else o
+                           for o in obligations]
+        result['obligations'] = obligations
     return result
+
+
+_PASTED = '\n## Pasted frontmatter\n\n```yaml\n'
+
+
+def _pasted_block(text: str) -> str | None:
+    """The frontmatter ``capture_note`` kept from a pasted note, or ``None``."""
+    start = text.rfind(_PASTED)
+    if start < 0:
+        return None
+    start += len(_PASTED)
+    end = text.find('\n```\n', start)
+    return text[start:end + 1] if end >= 0 else None
 
 
 def _sources(store):
@@ -153,7 +178,7 @@ def _capture_vault_unlocked(store, root) -> dict:
                 workstream = str(meta.get('workstream', 'general'))
                 obligations = meta.get('obligations', [])
                 if not isinstance(obligations, list) or not all(isinstance(o, dict) for o in obligations):
-                    raise ValueError('obligations must be a JSON array of objects')
+                    raise ValueError('obligations in the pasted frontmatter must be a JSON array of objects')
                 suggestions = []
                 if not ids:
                     for project in known_projects:
@@ -284,7 +309,10 @@ def _split_pasted(body: str) -> tuple[str | None, str]:
     closing = next((i for i in range(1, len(lines)) if lines[i].strip() == '---'), None)
     if closing is None:
         return None, body
-    return ''.join(lines[1:closing]), ''.join(lines[closing + 1:])
+    inner = lines[1:closing]
+    if inner and not any(re.match(r'[A-Za-z_][\w-]*:', line) for line in inner):
+        return None, body  # a markdown rule around prose, not frontmatter
+    return ''.join(inner), ''.join(lines[closing + 1:])
 
 
 def _write_inbox_note_unlocked(store, root, title: str, body: str, project_ids: list[str] | None = None, workstream: str | None = None, project_id: str | None = None) -> dict:
@@ -311,19 +339,20 @@ def _write_inbox_note_unlocked(store, root, title: str, body: str, project_ids: 
         raise ValueError('Select up to 20 nonempty stable project IDs')
     if workstream is not None and (not isinstance(workstream, str) or not workstream.strip() or len(workstream) > 200):
         raise ValueError('Workstream must be a nonempty string up to 200 characters')
+    body = body.replace('\r\n', '\n').replace('\r', '\n')  # ai-dlc hashes LF text; Windows pastes CRLF
     pasted, rest = _split_pasted(body)
     meta = _metadata('---\n' + pasted + '---\n') if pasted is not None else {}
     existing = meta.get('project_ids', [])
     if isinstance(existing, str):
         existing = [existing]
     if not isinstance(existing, list) or not all(isinstance(p, str) and p.strip() for p in existing):
-        raise ValueError('Existing project_ids metadata must contain stable ID strings')
+        raise ValueError('project_ids in the pasted frontmatter must be a JSON array of stable ID strings')
     projects = list(dict.fromkeys([*existing, *selected]))
     if workstream is None and isinstance(meta.get('workstream'), str) and meta['workstream'].strip():
         workstream = meta['workstream']
     obligations = meta.get('obligations', [])
     if not isinstance(obligations, list) or not all(isinstance(o, dict) for o in obligations):
-        raise ValueError('obligations must be a JSON array of objects')
+        raise ValueError('obligations in the pasted frontmatter must be a JSON array of objects')
     title = ' '.join(str(title).split())[:200] or 'Captured context'
     inbox = root / 'Inbox'
     if inbox.is_symlink():
@@ -335,7 +364,7 @@ def _write_inbox_note_unlocked(store, root, title: str, body: str, project_ids: 
     source_id = f'vault:{namespace}:Inbox/{name}'
     payload = f'\n# {title}\n\n{rest.strip(chr(10))}\n'
     if pasted is not None and pasted.strip():
-        payload += '\n## Pasted frontmatter\n\n```yaml\n' + pasted.rstrip('\n') + '\n```\n'
+        payload += _PASTED + pasted.rstrip('\n') + '\n```\n'
     header, not_in_header = capture_record_header(
         source_id=source_id, resource=f'Inbox/{name}', title=title, payload=payload,
         projects=projects, workstream=workstream, obligations=obligations,

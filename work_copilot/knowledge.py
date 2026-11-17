@@ -172,8 +172,17 @@ def render_frontmatter(fields: dict) -> str:
     JSON is a subset of YAML 1.2 flow style, so any YAML reader parses it, and dates
     stay strings as the JSON Schema expects.
     """
-    lines = [f'{key}: {json.dumps(value, ensure_ascii=False)}' for key, value in fields.items()]
+    lines = [f'{key}: {_yaml_safe(json.dumps(value, ensure_ascii=False))}' for key, value in fields.items()]
     return '---\n' + '\n'.join(lines) + '\n---\n'
+
+
+def _yaml_safe(text: str) -> str:
+    """Escape what JSON leaves raw but YAML refuses: DEL, C1 controls, U+FFFE and U+FFFF.
+
+    They only occur inside JSON strings, where ``\\uXXXX`` means the same character.
+    """
+    return ''.join(f'\\u{ord(char):04x}' if 0x7f <= ord(char) <= 0x9f or char in '\ufffe\uffff' else char
+                   for char in text)
 
 
 def parse_frontmatter(text: str) -> dict | None:
@@ -260,7 +269,7 @@ def capture_record_header(*, source_id: str, resource: str, title: str, payload:
         if not isinstance(item.get('intent_key'), str) or not item['intent_key'].strip() \
                 or not isinstance(item.get('title'), str) or not item['title'].strip():
             raise ValueError(f'obligations[{index}] needs a nonempty intent_key and title')
-        entry = {key: item[key] for key in _OBLIGATION_FIELDS if key in item}
+        entry = {key: item[key] for key in _OBLIGATION_FIELDS if item.get(key) is not None}
         if 'status' in entry and entry['status'] not in OBLIGATION_STATUSES:
             raise ValueError(f'obligations[{index}].status must be one of ' + ', '.join(OBLIGATION_STATUSES))
         kept.append(entry)

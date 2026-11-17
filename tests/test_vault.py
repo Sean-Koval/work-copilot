@@ -165,9 +165,7 @@ class InboxMetadataTests(VaultFixture):
         pasted = self.store.sources[receipt['source_ids'][0]]
         dropped = next(s for s in self.store.sources.values() if s['title'] == 'Dropped.md')
         self.assertEqual(pasted['projects'], dropped['projects'])
-        fields = ('intent_key', 'title', 'project_id')
-        self.assertEqual([{k: o.get(k) for k in fields} for o in pasted['obligations']],
-                         [{k: o.get(k) for k in fields} for o in dropped['obligations']])
+        self.assertEqual(pasted['obligations'], dropped['obligations'])
         self.assertEqual(receipt['not_in_header'], [])
         written = Path(receipt['path']).read_text(encoding='utf-8')
         self.assertTrue(written.startswith('---\nid: '))
