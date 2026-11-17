@@ -39,7 +39,7 @@ def test_wizard_creates_folders_project_and_prints_registration(tmp_path):
         store.close()
     line = result.stdout.strip().splitlines()[-1]
     assert line.startswith('claude mcp add --scope user --transport stdio work-copilot --env ')
-    assert ' -- ' in line and line.endswith(' mcp')
+    assert (" '--' " if os.name == 'nt' else ' -- ') in line and line.endswith(' mcp')
     assert 'WORK_COPILOT_TIMEZONE=America/New_York' in line
     assert not (tmp_path/'home'/'.claude.json').exists()
 

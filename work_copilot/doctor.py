@@ -109,9 +109,10 @@ def _mcp_registration_check(directory, timezone_name=None, vault=None, home=None
     except (OSError, RuntimeError):
         return {'ok':False,'status':'warning','note':'Cannot locate the home directory to read Claude Code settings.','fix':fix}
     found = []; unreadable = []
-    for scope, path, servers in (('user', user_file, lambda c: c.get('mcpServers')),
-                                 ('local', user_file, lambda c: (c.get('projects') or {}).get(str(cwd), {}).get('mcpServers')),
-                                 ('project', cwd/'.mcp.json', lambda c: c.get('mcpServers'))):
+    # Claude Code's precedence: local, then project, then user scope.
+    for scope, path, servers in (('local', user_file, lambda c: (c.get('projects') or {}).get(str(cwd), {}).get('mcpServers')),
+                                 ('project', cwd/'.mcp.json', lambda c: c.get('mcpServers')),
+                                 ('user', user_file, lambda c: c.get('mcpServers'))):
         try:
             if not path.is_file():
                 continue
@@ -130,7 +131,10 @@ def _mcp_registration_check(directory, timezone_name=None, vault=None, home=None
     scope, path, entry = found[0]
     result = {'ok':True,'status':'ok','scope':scope,'path':str(path),'note':f'Registered in Claude Code ({scope} scope); not started or contacted.'}
     registered = _registered_data_dir(entry)
-    if registered and _same_path(registered, directory) is False:
+    if registered is None:
+        from .cli import default_data_dir
+        registered = str(default_data_dir())
+    if _same_path(registered, directory) is False:
         result.update(ok=False,status='warning',registered_data_dir=registered,note=f'Registered ({scope} scope), but with another data directory: the agent and this checkout would see different state.',fix='claude mcp remove --scope '+scope+' work-copilot, then '+fix)
     elif scope == 'project':
         result['note'] += ' Project-scoped servers need your approval when Claude Code asks.'
@@ -178,7 +182,6 @@ def _result(directory, database, connectors, projects, timezone_name, vault, con
     }
     if vault:
         checks['vault_sync']=_vault_sync_check(vault)
-    if vault:
         from .vault import _root
         try:
             root=_root(vault)

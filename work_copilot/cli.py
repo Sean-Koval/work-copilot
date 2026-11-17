@@ -93,8 +93,8 @@ def _run():
         except (ValueError,OSError) as exc:
             print(f'Error: {exc}',file=sys.stderr)
             raise SystemExit(1)
-        except EOFError:
-            print('Error: input ended before the wizard finished; nothing else was created.',file=sys.stderr)
+        except (EOFError,KeyboardInterrupt):
+            print('Error: input ended before the wizard finished; nothing was created.',file=sys.stderr)
             raise SystemExit(1)
         return
     if args.command=='doctor':

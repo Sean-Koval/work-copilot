@@ -139,7 +139,7 @@ def test_doctor_mcp_registration_user_project_and_local_scopes(tmp_path, monkeyp
     assert _registration(tmp_path,monkeypatch,user={'work-copilot':entry})['scope']=='user'
     assert _registration(tmp_path,monkeypatch,user={'other':entry},local={'work-copilot':entry})['scope']=='local'
     (tmp_path/'p').mkdir()
-    project=_registration(tmp_path/'p',monkeypatch,project={'work-copilot':{'command':'work-copilot','args':['mcp']}})
+    project=_registration(tmp_path/'p',monkeypatch,project={'work-copilot':{'command':'work-copilot','args':['mcp','--data-dir',str(tmp_path/'p'/'data')]}})
     assert project['status']=='ok' and project['scope']=='project' and 'approval' in project['note']
 
 
@@ -214,3 +214,14 @@ def test_doctor_new_checks_in_cli_output_and_read_only(tmp_path):
         assert checks[name]['ok'] or checks[name]['fix']
     assert checks['database']['path']==str((tmp_path/'data'/'copilot.db').resolve())
     assert sorted(p.name for p in tmp_path.iterdir())==['home','vault'] and list(home.iterdir())==[]
+
+
+def test_doctor_mcp_registration_follows_scope_precedence_and_default_dir(tmp_path, monkeypatch):
+    monkeypatch.setenv('XDG_DATA_HOME',str(tmp_path/'xdg'))
+    right={'command':'work-copilot','args':['mcp'],'env':{'WORK_COPILOT_DATA_DIR':str(tmp_path/'data')}}
+    wrong={'command':'work-copilot','args':['mcp','--data-dir',str(tmp_path/'other')]}
+    result=_registration(tmp_path,monkeypatch,user={'work-copilot':wrong},project={'work-copilot':right})
+    assert result['status']=='ok' and result['scope']=='project'
+    (tmp_path/'x').mkdir()
+    unset=_registration(tmp_path/'x',monkeypatch,user={'work-copilot':{'command':'work-copilot','args':['mcp']}})
+    assert unset['status']=='warning' and unset['registered_data_dir']==str(tmp_path/'xdg'/'work-copilot')
