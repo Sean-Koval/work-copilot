@@ -72,11 +72,14 @@ class Store:
         self.db.execute('PRAGMA foreign_keys=ON')
         # Ordered migrations, with a backup first when the database already holds data.
         self.migration=schema.migrate(self.db,self.path)
-        # Search and project links are kept current on write. Rebuild them only after a
-        # migration or when the projection code changed, never on every open (KAN-388).
+        # Backups hold captured text; keep none past the retention limit.
+        schema.prune_backups(self.path)
+        # Search and project links are kept current on write. Rebuild them only when the
+        # marker is missing (a migration or an import cleared it) or the projection code
+        # changed, never on every open (KAN-388).
         self.db.execute('BEGIN IMMEDIATE')
         built=self.db.execute("SELECT payload FROM local_metadata WHERE key='projections'").fetchone()
-        if self.migration['from']<self.migration['to'] or not built or json.loads(built[0]).get('version')!=PROJECTION_VERSION:
+        if not built or json.loads(built[0]).get('version')!=PROJECTION_VERSION:
             self._rebuild_all_projections()
         self.db.commit()
         try:
@@ -152,8 +155,6 @@ class Store:
                 result=schema.import_jsonl(source,staging)
                 check=cls(staging,**options)
                 try:
-                    # Projections are not exported; build them for the restored records.
-                    check.rebuild_projections()
                     # Read every record back through the store, then discard any plan it anchors.
                     check.db.execute('BEGIN')
                     try:
@@ -898,5 +899,5 @@ class Store:
                 raise ValueError('Room IDs must be unique within a project')
             self.db.execute('UPDATE projects SET name=? WHERE id=?',(name,id))
             self.db.execute('INSERT OR REPLACE INTO project_config(project_id,aliases,rooms,revision) VALUES(?,?,?,?)',(id,_json(list(dict.fromkeys(aliases))),_json(rooms),revision+1))
-            self._rebuild_project_projections(id,{room['id'] for room in rooms}|{room['id'] for room in config['rooms']})
+            self._rebuild_project_projections(id,{room['id'] for room in rooms})  # sources of removed rooms are already linked
             return self.project(id)

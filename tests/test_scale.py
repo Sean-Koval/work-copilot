@@ -70,3 +70,20 @@ def test_scale_check_runs():
                          capture_output=True, text=True, cwd=ROOT)
     assert run.returncode == 0, run.stderr
     assert json.loads(run.stdout)['obligations'] == 30
+
+
+def test_a_crash_after_a_migration_still_rebuilds_on_next_open(populated, monkeypatch):
+    import sqlite3
+    from work_copilot import schema
+    db = sqlite3.connect(populated / 'copilot.db')
+    db.execute('DELETE FROM source_search'); db.commit(); db.close()
+
+    def second(db):
+        pass
+    monkeypatch.setattr(schema, 'MIGRATIONS', schema.MIGRATIONS + (second,))
+    monkeypatch.setattr(schema, 'SCHEMA_VERSION', len(schema.MIGRATIONS))
+    with monkeypatch.context() as patch:
+        patch.setattr(Store, '_rebuild_all_projections', lambda self: (_ for _ in ()).throw(RuntimeError('crash')))
+        with pytest.raises(RuntimeError):
+            Store(populated / 'copilot.db')
+    assert Store(populated / 'copilot.db').search('Thread 17')

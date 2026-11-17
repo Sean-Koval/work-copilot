@@ -50,6 +50,13 @@ def _database_details(db):
     return integrity,connectors,projects
 
 
+def _backup_status(database_path):
+    from .schema import backups, BACKUP_MAX_AGE_DAYS
+    found=backups(database_path)
+    oldest=found[0].name.rsplit('-',1)[-1].removesuffix('.db') if found else None
+    return {'count':len(found),'oldest':oldest,'folder':str(Path(database_path).parent/'backups'),'note':f'Pre-migration copies of all captured text; removed after {BACKUP_MAX_AGE_DAYS} days.'}
+
+
 def _schema_status(user_version):
     from .schema import SCHEMA_VERSION
     if user_version>SCHEMA_VERSION:
@@ -150,6 +157,7 @@ def _diagnose_path(data_dir, vault, config, timezone_name, database_path):
                         db.close()
                     database.update(ok=integrity=='ok',status='ready' if integrity=='ok' else 'corrupt',integrity=integrity,note='Read-only check of a private temporary DB/WAL snapshot; original files unchanged.')
                     database.update(_schema_status(user_version))
+                    database['backups']=_backup_status(path)
     except (OSError,sqlite3.Error,ValueError,TypeError):
         database.update(ok=False,status='unreadable_or_invalid',note='Database is unreadable, incompatible or corrupt. Check permissions and restore a verified backup; doctor made no repairs.')
         connectors=[];projects=0
