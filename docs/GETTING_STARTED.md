@@ -72,6 +72,14 @@ To capture a copy as a second vault, delete that file in the copy first; two fol
 ./run.sh --timezone America/New_York --data-dir /absolute/private/copilot serve --vault /absolute/work-vault
 ```
 
+Or let the wizard set it up: it creates the vault's `Notes`, `Meeting notes`, `Research` and `Decision write-ups` folders, the first project and the private data directory, then prints the `claude mcp add` line (on Windows, run it in PowerShell, not cmd.exe). It checks everything before creating anything, only creates what is missing and overwrites nothing. A new data directory gets owner-only permissions; an existing one is left as it is, with a warning if others can read it. On a terminal it asks for missing values; otherwise pass them all:
+
+```sh
+./run.sh --timezone America/New_York --data-dir /absolute/private/copilot init --wizard --vault /absolute/work-vault --project-id atlas --project-name Atlas
+```
+
+`WORK_COPILOT_DATA_DIR`, when set and not empty, is the default `--data-dir` (except for `demo`). Keep it per machine, never in shared configuration.
+
 1. Create a project in the dashboard with a stable ID, display name, known aliases and room IDs. A project can have several rooms; a room can belong to several projects. This creates local metadata, not remote rooms.
 2. Paste a short permitted note/transcript with **Capture note**, selecting its project/workstream, or drop a UTF-8 `.md` file into the selected folder.
 3. Review unassigned mapping/ownership candidates. Inspect the original source and the separate `Work Copilot Generated/` project wiki. Handwritten originals are preserved; generated projections are not a second editable task list.
@@ -83,7 +91,7 @@ See [Daily workflow](DAILY_WORKFLOW.md) for the regular loop and [connector/meta
 
 ## 4. Use the same state from an approved agent
 
-After installation, add a stdio MCP server using your client's supported configuration interface. This is a conventional configuration example, **not a verified installation recipe for a specific client/version**. Use absolute paths, the same real data directory as the dashboard, and your actual timezone:
+For Claude Code, run the `claude mcp add --scope user …` line that `init --wizard` printed; `doctor` prints it again when no registration is found. For other clients, add a stdio MCP server using the client's supported configuration interface. This is a conventional configuration example, **not a verified installation recipe for a specific client/version**. Use absolute paths, the same real data directory as the dashboard, and your actual timezone:
 
 ```json
 {
@@ -110,7 +118,7 @@ Ask the client to list projects, retrieve one source passage, then track a ficti
 ./run.sh --data-dir /absolute/private/copilot doctor --vault /absolute/work-vault
 ```
 
-Doctor inspects local readiness; it does not authorize or contact a server. For an approved Symphony OAuth MCP endpoint, follow [Symphony MCP setup](SYMPHONY_MCP.md). Endpoint tools, scopes and response schema must be verified against your actual server. No vendor-specific Jira/GitHub/Confluence integration or live company-server test is implied by the fictional demo or smoke result.
+Doctor inspects local readiness; it does not authorize or contact a server. It also reports whether Claude Code has a `work-copilot` server registered (user scope, or local scope and `.mcp.json` for the project's git root, else the current directory; and whether it uses the same data directory), whether the vault sits in OneDrive, iCloud, Dropbox or Google Drive (company notes copied into personal sync) or under a symlink, whether a company overlay is applied, and whether a team `rules.json` beside the database is valid (the dashboard and MCP server refuse to start on a bad one). Each reports `ok`, `warning` or `error`, with a `fix` when not ok; it only reads files. The overlay `fix` names `overlay apply`, which arrives with KAN-381. For an approved Symphony OAuth MCP endpoint, follow [Symphony MCP setup](SYMPHONY_MCP.md). Endpoint tools, scopes and response schema must be verified against your actual server. No vendor-specific Jira/GitHub/Confluence integration or live company-server test is implied by the fictional demo or smoke result.
 
 ### Upgrades, backups and moving your data
 
