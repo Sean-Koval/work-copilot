@@ -21,6 +21,8 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .ids import ask_kind
+
 RULES_FILE = 'rules.json'
 # The stored owner value for the person using this copilot.
 SELF = 'me'
@@ -192,7 +194,7 @@ class Rules:
 
     @staticmethod
     def ask_kind(intent_key):
-        return intent_key
+        return ask_kind(intent_key)
 
     def intent_rule(self, intent_key):
         kind = self.ask_kind(intent_key)

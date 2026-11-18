@@ -53,7 +53,7 @@ def test_moving_the_vault_keeps_notes_and_evidence(setup):
     tmp_path, root, store = setup
     capture_vault(store, root)
     before = _state(store)
-    assert any(o[1] == 'confirm-release' and o[2] for o in before[1])
+    assert any(o[1].endswith(':confirm-release') and o[2] for o in before[1])
     moved = _move(root, tmp_path)
     report = capture_vault(store, moved)
     assert not report['errors']
@@ -181,22 +181,23 @@ def test_notes_under_both_namespaces_merge_keeping_the_reviewed_obligation(setup
     tmp_path, root, store = setup
     legacy = _legacy_capture(monkeypatch, store, root)
     old_note = f'vault:{legacy}:loose.md'
-    reviewed = store.track_obligation({'intent_key': f'map:{old_note}', 'title': 'Map the loose note', 'project_id': 'atlas', 'evidence_ids': [old_note]})
+    reviewed = store.track_obligation({'intent_key': f'{old_note}:map', 'title': 'Map the loose note', 'project_id': 'atlas', 'evidence_ids': [old_note]})
     reviewed = store.review(reviewed['id'], reviewed['revision'], {'status': 'waiting', 'waiting_on': 'Priya'})
     with monkeypatch.context() as patch:
         patch.setattr(Store, '_rename_vault_namespace', lambda self, old, new: 0)
         vault_id = capture_vault(store, root)['vault_id']
     new_note = f'vault:{vault_id}:loose.md'
-    fresh = store.track_obligation({'intent_key': f'map:{new_note}', 'title': 'Map the loose note', 'project_id': 'atlas', 'evidence_ids': [new_note]})
+    fresh = store.track_obligation({'intent_key': f'{new_note}:map', 'title': 'Map the loose note', 'project_id': 'atlas', 'evidence_ids': [new_note]})
     store.draft(fresh['id'])
     assert len(store.list_sources(provider='vault')) == 4
     capture_vault(store, root, moved_from=root)
     sources = [(s['id'], s['deleted']) for s in store.list_sources(provider='vault')]
     assert all(sid.startswith(f'vault:{vault_id}:') and not deleted for sid, deleted in sources) and len(sources) == 2
-    # capture's own review candidate (no project) merged the same way; one of each remains.
-    assert sorted(o['project_id'] or '' for o in store.snapshot()['obligations'] if o['intent_key'] == f'map:{new_note}') == ['', 'atlas']
-    mapped = [o for o in store.snapshot()['obligations'] if o['intent_key'] == f'map:{new_note}' and o['project_id'] == 'atlas']
+    # The intent key names the note (KAN-392), so it is renamed with the namespace: the two
+    # obligations meet under one key, and the reviewed one is kept.
+    mapped = [o for o in store.snapshot()['obligations'] if o['intent_key'] == f'{new_note}:map']
     assert len(mapped) == 1 and mapped[0]['id'] == reviewed['id'] and mapped[0]['waiting_on'] == 'Priya'
+    assert not any(legacy in o['intent_key'] for o in store.snapshot()['obligations'])
     assert [e['id'] for e in mapped[0]['evidence'] if e['id'].startswith('vault:')] == [new_note]
     assert store.draft(reviewed['id'])  # the fresh obligation's draft moved; snapshot and drafts still work
     assert all(e.startswith(f'vault:{vault_id}:') for o in _state(store)[1] for e in o[2] if e.startswith('vault:'))
@@ -387,3 +388,46 @@ def test_a_vault_whose_notes_were_all_forgotten_still_records_its_alias(setup, m
     keys = {row[0] for row in store.db.execute("SELECT key FROM local_metadata")}
     assert f'vault-alias:{legacy}' in keys
     assert f"forgotten:vault:{report['vault_id']}:loose.md" in keys
+
+
+def _front(path):
+    from work_copilot.knowledge import parse_frontmatter
+    front = parse_frontmatter(Path(path).read_text(encoding='utf-8'))
+    assert front is not None
+    return front
+
+
+def test_a_captured_note_header_carries_the_stable_id(setup):
+    """KAN-394 (#10) builds capture_note's record header from _vault_namespace: the stable id."""
+    from test_knowledge import record_errors
+    from work_copilot.knowledge import record_id
+    _, root, store = setup
+    receipt = write_inbox_note(store, root, 'Standup', 'Atlas is blocked on review.', project_id='atlas')
+    vault_id = json.loads((root / VAULT_ID_FILE).read_text(encoding='utf-8'))['vault_id']
+    source_id = receipt['source_ids'][0]
+    assert source_id == f"vault:{vault_id}:Inbox/{Path(receipt['path']).name}"
+    front = _front(receipt['path'])
+    assert front['id'] == record_id(source_id, 'vault') == vault_module._record_id(source_id)
+    assert [s['id'] for s in front['sources']] == [source_id]
+    assert record_errors(Path(receipt['path'])) == []
+    assert store.source(source_id) and receipt['capture']['namespace'] == vault_id
+
+
+def test_a_header_written_under_the_path_hash_is_renamed_and_stays_valid(setup, monkeypatch):
+    from test_knowledge import record_errors
+    _, root, store = setup
+    with monkeypatch.context() as patch:
+        patch.setattr(vault_module, '_write_vault_id', lambda root: (_ for _ in ()).throw(vault_module._ReadOnlyVault(13, 'Permission denied')))
+        receipt = write_inbox_note(store, root, 'Standup', 'Atlas is blocked on review.', project_id='atlas')
+    legacy = vault_module._legacy_namespace(root)
+    assert receipt['source_ids'][0].startswith(f'vault:{legacy}:Inbox/')
+    before = _front(receipt['path'])
+    report = capture_vault(store, root)
+    assert report['rewritten_note_headers'] == 1
+    renamed = f"vault:{report['vault_id']}:Inbox/{Path(receipt['path']).name}"
+    after = _front(receipt['path'])
+    assert after['id'] == vault_module._record_id(renamed) and [s['id'] for s in after['sources']] == [renamed]
+    # Only the ids changed: the payload hash still matches the file, so the record stays valid.
+    assert after['revision'] == before['revision'] and after['sources'][0]['hash'] == before['sources'][0]['hash']
+    assert record_errors(Path(receipt['path'])) == []
+    assert store.source(renamed) and not [s for s in store.list_sources() if legacy in s['id']]

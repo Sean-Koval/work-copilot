@@ -95,7 +95,7 @@ def _run():
         if args.file.stat().st_size>MAX_EVENT_BYTES:
             parser.error('Activity file exceeds 64 KiB')
         try:
-            print(json.dumps(enqueue_activity(data,json.loads(args.file.read_text(encoding='utf-8'))),indent=2))
+            print(json.dumps(enqueue_activity(data,json.loads(args.file.read_text(encoding='utf-8')),os.environ),indent=2))
         except (ValueError,OSError) as exc:
             parser.error(str(exc))
         return
@@ -142,10 +142,10 @@ def _run():
             from .hooks import enqueue_activity, ingest_activity
             event=json.loads(args.file.read_text(encoding='utf-8'))
             if args.queue_only:
-                result=enqueue_activity(data,event)
+                result=enqueue_activity(data,event,os.environ)
             else:
                 config=json.loads(args.config.read_text(encoding='utf-8')) if args.config else None
-                result=ingest_activity(store,event,config)
+                result=ingest_activity(store,event,config,os.environ)
         elif args.command=='drain-activity':
             from .hooks import drain_activity
             config=json.loads(args.config.read_text(encoding='utf-8')) if args.config else None

@@ -27,14 +27,14 @@ ATTENTION_BUDGET = 0.2
 def synthetic(count):
     for number in range(count):
         project = f'p{number % 20}'
-        record = {'id': f'scale/{number}', 'revision': '1', 'provider': 'scale', 'title': f'Thread {number}',
+        record = {'id': f'scale:local:{number}', 'revision': '1', 'provider': 'scale', 'title': f'Thread {number}',
                   'body': f'Synthetic message {number}. ' + 'lorem ipsum dolor sit amet ' * 36,
                   'room_id': f'room{number % 40}', 'room_name': f'Room {number % 40}',
                   'observed_at': f'2026-11-{1 + number % 16:02d}T12:00:00+00:00',
                   'projects': [{'id': project, 'name': f'Project {number % 20}', 'workstream': 'Engineering'}],
                   'obligations': []}
         if number % 10 == 0:
-            record['obligations'] = [{'intent_key': f'follow-up-{number}', 'title': f'Follow up on thread {number}',
+            record['obligations'] = [{'intent_key': f'scale:local:{number}:follow-up', 'title': f'Follow up on thread {number}',
                                       'project_id': project, 'owner': 'me'}]
         yield record
 

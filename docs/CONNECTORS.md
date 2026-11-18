@@ -26,6 +26,8 @@ Risk: deployment evidence has not been provided.
 Awareness: the commercial and engineering rooms share this project.
 ```
 
+An `intent_key` that is a bare ask kind, as above, is an ask from this note: it is stored as `<note source id>:release-confirmation`. Give a full intent key (see [Ids and intent keys](#ids-and-intent-keys)) to tie the note to an ask another source carries. A note with any other key is reported as an error and not captured.
+
 `owner: null` stays unresolved. Set `owner: "me"` only with explicit evidence; missing ownership is never guessed. `project_ids` supplies IDs, not display-name matching. A shared note may support multiple projects. Different per-project workstreams can be represented through normalized JSON import.
 
 Each source retains relative note path, content revision, original file link and `L<number>` passage labels. Editing a file keeps its source ID; reverting or restoring it creates a new revision. Renaming a file is represented as old-path deletion plus new-path source (no fuzzy identity merging). Deletions become tombstones; historical snapshots may remain in SQLite. Exports remove deleted current evidence. This is not secure erasure or an organizational retention implementation.
@@ -56,13 +58,27 @@ The envelope is versioned: `schema_version` is `1`, and a missing value is read 
     "room_id": "example:tenant:room:commercial",
     "room_name": "Commercial",
     "projects": [{"id":"atlas","name":"Atlas","workstream":"commercial"}],
-    "obligations": [{"intent_key":"staging-validation","title":"Confirm staging validation","project_id":"atlas","owner":null,"status":"candidate","question_state":"pending","commitment":false}],
+    "obligations": [{"intent_key":"example:tenant:message:42:staging-validation","title":"Confirm staging validation","project_id":"atlas","owner":null,"status":"candidate","question_state":"pending","commitment":false}],
     "deleted": false
   }
 ]
 ```
 
-Source IDs must include provider + account/tenant + object identity to avoid collisions. Revisions are immutable: replay is idempotent; changed content needs a new revision. Timestamps require timezone offsets. A tombstone retains source ID and uses a new revision with `deleted: true`. Canonical obligation identity is `(project_id, intent_key)`, so two source records can support one question. Producers must choose intent keys deliberately; semantic deduplication is not claimed.
+Revisions are immutable: replay is idempotent; changed content needs a new revision. Timestamps require timezone offsets. A tombstone retains source ID and uses a new revision with `deleted: true`.
+
+### Ids and intent keys
+
+A source `id` is `provider:site:object`, such as `jira:acme.atlassian.net:ATLAS-12`. `provider` is lower case and equals the envelope's `provider` field. `site` names the instance (a Jira site, a tenant, a vault), so the same issue key on two sites is two sources. `object` is the provider's own id. It may contain `:` and `/`, but no control characters or leading or trailing spaces.
+
+An `intent_key` is `<source id>:<ask kind>`, such as `jira:acme.atlassian.net:ATLAS-12:reply`. The ask kind is lower-case letters, digits and dashes. The source part names where the ask came from; that source need not be ingested here.
+
+The intent key alone is an obligation's identity. Two sources that carry the same key support one obligation, even when they map to different projects. Running a sweep again over the same asks, or ingesting a new revision, creates no new obligation. Producers choose the key deliberately; semantic deduplication is not claimed.
+
+Ingest refuses any other id or key, and an id whose provider differs from `provider`. It then writes nothing from that batch. Sources and obligations stored before these rules keep their ids and their `(project_id, intent_key)` identity.
+
+Upgrading keeps the records you reviewed. A vault note, a review-queue item or a tracked ask met again finds the obligation it made before, so a dismissal or an edit stays. When the same ask arrives under another project, the record keeps its project and is sent to review with a `review_reason`.
+
+Sources in an old id format are not migrated. A demo seeded before, an old activity id or a remote source without `id_prefix` stays in the ledger as it was. Its new copy is a separate source beside it. To start clean, seed the demo into a fresh data directory.
 
 A connector capability/config record should state:
 
@@ -115,12 +131,14 @@ The server registers eleven tools: five read-only, five local-write, and `captur
 
 Read-only tools: `get_attention`, `get_project(project_id)`, `get_source(source_id, offset?, max_chars?)`, `get_reply_context(obligation_id)`, and `search_context(query, project_id?, workstream?, provider?, since?, until?, limit?)` return observed source passages and revision citations. Search is local full-text retrieval, not semantic interpretation.
 
-Explicit local-write tools: `create_project(id, name, aliases?, rooms?)`, `track_obligation(payload)`, `review_obligation(obligation_id, revision, changes)`, `update_project(project_id, revision, changes)` and `set_priorities(ids, revision)` manage local operational records only. `payload` and both `changes` arguments have typed input schemas, so a client can discover their fields; unknown fields are rejected. Start by creating stable projects with explicit aliases and room IDs; one room may belong to multiple projects. No remote discovery or connection happens when creating this metadata. Configure `WORK_COPILOT_VAULT=/absolute/selected/vault` in your MCP client's environment to additionally expose `capture_note(title, body, project_id?, project_ids?, workstream?)`. Without that explicit setting, the capture tool is absent. Optional project/workstream selections write explicit frontmatter, so ordinary pasted text needs no hand-written JSON. Existing pasted frontmatter stays first and retains its structured actions. Capture creates a new Inbox note and returns source/obligation IDs; it never rewrites an original. Read/write SDK annotations reflect these differences.
+Explicit local-write tools: `create_project(id, name, aliases?, rooms?)`, `track_obligation(payload)`, `review_obligation(obligation_id, revision, changes)`, `update_project(project_id, revision, changes)` and `set_priorities(ids, revision)` manage local operational records only. `payload` and both `changes` arguments have typed input schemas, so a client can discover their fields; unknown fields are rejected. Start by creating stable projects with explicit aliases and room IDs; one room may belong to multiple projects. No remote discovery or connection happens when creating this metadata. Configure `WORK_COPILOT_VAULT=/absolute/selected/vault` in your MCP client's environment to additionally expose `capture_note(title, body, project_id?, project_ids?, workstream?)`. Without that explicit setting, the capture tool is absent. The note's frontmatter is an ai-dlc knowledge record: a `source` record with status `raw`, so `ai-dlc knowledge check` reads it with no Work Copilot grammar. Selected projects become `belongs_to` links and the workstream a `workstream:<name>` tag. `revision` and the `sources` hash are the sha256 of everything below the frontmatter. `owner` comes from `WORK_COPILOT_KNOWLEDGE_OWNER`, else `local-user`. Pasted frontmatter keeps its projects, workstream and actions; its text stays in the note under `Pasted frontmatter`, where Work Copilot reads back the action fields the record cannot hold, and the receipt's `not_in_header` names them. Line endings are stored as LF. ai-dlc's check refuses notes over 64 KB, so paste a long transcript as a file source instead. Hand-written notes with `project_ids`, `workstream` and `obligations` lines are still read. Capture creates a new Inbox note and returns source/obligation IDs; it never rewrites an original. Read/write SDK annotations reflect these differences.
 
 For “Waiting on Alex for the Atlas transcript; follow up tomorrow,” your agent resolves the actual project ID and date, then submits structured data such as:
 
 ```json
 {"intent_key":"atlas-transcript","title":"Get Atlas transcript","project_id":"atlas","status":"waiting","waiting_on":"Alex","follow_up_at":"2026-10-27","owner":"me","question_state":"pending"}
 ```
+
+`intent_key` may be a bare ask kind, as here, for an ask you track by hand. It is stored as `local-user:local:tracked:atlas-transcript`, so tracking it again returns the same record, even one tracked before this format. Tracking it again for another project returns that record with a `review_reason` and leaves its project as it was. A full intent key ties the record to an ask a source already carries.
 
 The service validates fields and persists the local record; it does not pretend to parse free-form natural language. `follow_up_at` is a personal reminder, distinct from a source-backed `due_at` promise. An unresolved person's display name is not recipient identity verification. Reviewing a record can change its local state but cannot approve a draft or authorize an external action. There are no approve, send, edit-original-source or OS-configuration tools. The stdio server has no exposed network port; protect the process account and local database. These tools provide context to your existing authoring workspace; they do not replace it. The implementation pins the SDK v1 compatibility line (`mcp<2`); see the [official v1 SDK documentation](https://py.sdk.modelcontextprotocol.io/v1/).
