@@ -171,7 +171,10 @@ class InboxMetadataTests(VaultFixture):
         self.assertEqual([o['intent_key'] for o in dropped['obligations']], [dropped['id'] + ':release'])
         self.assertEqual([{**o, 'intent_key': ask_kind(o['intent_key'])} for o in pasted['obligations']],
                          [{**o, 'intent_key': ask_kind(o['intent_key'])} for o in dropped['obligations']])
-        self.assertTrue(Path(receipt['path']).read_text(encoding='utf-8').startswith('---\n'))
+        self.assertEqual(receipt['not_in_header'], [])
+        written = Path(receipt['path']).read_text(encoding='utf-8')
+        self.assertTrue(written.startswith('---\nid: '))
+        self.assertIn('```yaml\nproject_ids: ["atlas"]\n', written)
 
 class ExplicitCaptureTests(VaultFixture):
     def test_optional_project_selection_needs_no_frontmatter(self):

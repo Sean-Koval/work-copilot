@@ -174,8 +174,17 @@ def render_frontmatter(fields: dict) -> str:
     JSON is a subset of YAML 1.2 flow style, so any YAML reader parses it, and dates
     stay strings as the JSON Schema expects.
     """
-    lines = [f'{key}: {json.dumps(value, ensure_ascii=False)}' for key, value in fields.items()]
+    lines = [f'{key}: {_yaml_safe(json.dumps(value, ensure_ascii=False))}' for key, value in fields.items()]
     return '---\n' + '\n'.join(lines) + '\n---\n'
+
+
+def _yaml_safe(text: str) -> str:
+    """Escape what JSON leaves raw but YAML refuses: DEL, C1 controls, U+FFFE and U+FFFF.
+
+    They only occur inside JSON strings, where ``\\uXXXX`` means the same character.
+    """
+    return ''.join(f'\\u{ord(char):04x}' if 0x7f <= ord(char) <= 0x9f or char in '\ufffe\uffff' else char
+                   for char in text)
 
 
 def parse_frontmatter(text: str) -> dict | None:
@@ -255,6 +264,63 @@ def build_record(source: dict, *, owner: str, scope: str, day: str, raw_resource
         body += [f'Work-Session: {session}', '']
     body += [f'Raw payload: `{raw_resource}`. Inbox candidate until {stale.date().isoformat()}.', '']
     return render_frontmatter(fields) + '\n'.join(body)
+
+
+# --- Captured notes ---------------------------------------------------------
+
+CAPTURE_AUTHOR = 'agent:work-copilot'
+"""``author`` of a note ``capture_note`` writes: the agent saves text the user supplied."""
+_CAPTURE_OWNER = 'local-user'
+_OBLIGATION_FIELDS = ('intent_key', 'title', 'status')
+
+
+def capture_record_header(*, source_id: str, resource: str, title: str, payload: str,
+                          projects, workstream: str | None, obligations, owner: str | None,
+                          now: datetime) -> tuple[str, list[str]]:
+    """Frontmatter for a note ``capture_note`` writes: a ``source`` record, status ``raw``.
+
+    ``payload`` is everything after the frontmatter; its sha256 is the record's
+    ``revision`` and its ``sources`` hash, so the header can be checked against the file.
+    Obligations keep the contract's fields; the names of any other field are returned
+    so the caller can say what the header does not carry.
+    """
+    digest = _sha256(payload.encode('utf-8'))
+    moment = now.astimezone(timezone.utc)
+    kept, dropped = [], []
+    for index, item in enumerate(obligations or []):
+        if not isinstance(item.get('intent_key'), str) or not item['intent_key'].strip() \
+                or not isinstance(item.get('title'), str) or not item['title'].strip():
+            raise ValueError(f'obligations[{index}] needs a nonempty intent_key and title')
+        entry = {key: item[key] for key in _OBLIGATION_FIELDS if item.get(key) is not None}
+        if 'status' in entry and entry['status'] not in OBLIGATION_STATUSES:
+            raise ValueError(f'obligations[{index}].status must be one of ' + ', '.join(OBLIGATION_STATUSES))
+        kept.append(entry)
+        # A note with one project gives its obligations that project on capture.
+        implied = {'project_id'} if len(projects) == 1 and item.get('project_id') == projects[0] else set()
+        dropped += [f'obligations[{index}].{key}' for key in item
+                    if key not in _OBLIGATION_FIELDS and key not in implied and item[key] is not None]
+    tags = ['capture'] + ([f'workstream:{workstream}'] if workstream else [])
+    fields = {
+        'id': record_id(source_id, 'vault'),
+        'type': 'source',
+        'scope': 'personal',
+        'status': 'raw',
+        'date': moment.date().isoformat(),
+        'owner': (owner or '').strip() or _CAPTURE_OWNER,
+        'sources': [{'id': source_id, 'resource': resource, 'hash': 'sha256:' + digest}],
+        'links': [{'type': 'belongs_to', 'target': target} for target in projects],
+        'title': title,
+        'tags': tags,
+        'label': 'internal',
+        'stale_after': (moment + CANDIDATE_WINDOW).isoformat().replace('+00:00', 'Z'),
+        'author': CAPTURE_AUTHOR,
+        'schema_version': ENVELOPE_VERSION,
+        'revision': 'sha256:' + digest,
+        'provider': 'vault',
+        'observed_at': moment.isoformat(),
+        'obligations': kept,
+    }
+    return render_frontmatter(fields), dropped
 
 
 # --- Marked notes -----------------------------------------------------------

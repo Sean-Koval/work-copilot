@@ -21,9 +21,9 @@ from work_copilot.store import Store
 from work_copilot.vault import capture_vault
 
 CONTRACT = Path(__file__).parent / 'contracts' / 'knowledge-record.schema.json'
-# ai-dlc contracts/knowledge-record.schema.json at commit e5d535622dbb (PR #256, KAN-421).
+# ai-dlc contracts/knowledge-record.schema.json at commit c217bd0 (main, 2026-11-17; adds retracts and quote fields).
 # Refresh the copy and this hash together when the contract changes.
-CONTRACT_SHA256 = '0a7633d88024a668140a6d658f09f5d11bf7e26b8ff09368abd82d17ddcd9bd7'
+CONTRACT_SHA256 = 'eda789937b670f3bc527ebffc366464af650bf3464defab33e084b0409444f59'
 FIXTURES = Path(__file__).parent / 'fixtures' / 'knowledge_export'
 NOW = datetime(2026, 11, 12, 18, 0, tzinfo=timezone.utc)
 SOURCES = [
