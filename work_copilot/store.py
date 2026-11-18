@@ -164,6 +164,8 @@ class Store:
                 if any(sidecar.exists() for sidecar in schema._sidecars(path)):
                     raise ValueError('A database journal appeared beside the target during import; nothing was restored')
                 os.replace(staging,path)
+                # Report where the database now is, not the staging file it was built in.
+                result['path']=str(path)
             except Exception as exc:
                 for leftover in (staging,*schema._sidecars(staging)):
                     leftover.unlink(missing_ok=True)
