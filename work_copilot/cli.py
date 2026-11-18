@@ -29,7 +29,7 @@ def _run():
     parser.add_argument('--timezone',default=os.environ.get('WORK_COPILOT_TIMEZONE','UTC'),help='IANA timezone for Today/follow-ups; default UTC')
     parser.add_argument('--data-dir',type=Path,help='Private state directory (never a public repository)')
     sub=parser.add_subparsers(dest='command',required=True)
-    for name in ['init','demo','serve','capture','export','import','mcp','connect','collect','doctor','activity','drain-activity','smoke','review-queue']:
+    for name in ['init','demo','serve','capture','export','import','mcp','connect','collect','doctor','activity','drain-activity','smoke','review-queue','forget']:
         p=sub.add_parser(name)
         if name=='activity':
             p.add_argument('--file',type=Path,required=True,help='Structured local session event JSON; no trace scraping')
@@ -40,6 +40,7 @@ def _run():
         elif name=='doctor':
             p.add_argument('--vault',type=Path)
             p.add_argument('--config',type=Path)
+            p.add_argument('--repair',action='store_true',help='Rebuild search and project links from recorded state, then diagnose')
         elif name in {'serve','demo'}:
             p.add_argument('--connector-config',type=Path,help='Explicit configured OAuth MCP collector; never opens OAuth automatically')
             p.add_argument('--port',type=int,default=8765)
@@ -61,6 +62,8 @@ def _run():
         elif name=='import':
             p.add_argument('file',type=Path,nargs='?',help='Normalized JSON envelope or source array')
             p.add_argument('--jsonl',type=Path,help='Restore a JSONL export into an empty --data-dir')
+        elif name=='forget':
+            p.add_argument('--source',required=True,help='Id of the source whose text to remove from the database and backups/ (not from exports or the wiki)')
         elif name in {'connect','collect'}:
             p.add_argument('--config',type=Path,required=True)
             p.add_argument('--authorize',action='store_true',help='Explicitly initiate OAuth in browser; only approved company server')
@@ -79,7 +82,7 @@ def _run():
         parser.error('Unknown IANA timezone')
     os.environ['WORK_COPILOT_TIMEZONE']=args.timezone
     data=(args.data_dir or default_data_dir(args.command=='demo')).expanduser().resolve()
-    if args.command=='doctor':
+    if args.command=='doctor' and not args.repair:
         from .doctor import diagnose_path
         print(json.dumps(diagnose_path(data,vault=args.vault,config=args.config,timezone_name=args.timezone),indent=2,default=str))
         return
@@ -148,7 +151,10 @@ def _run():
             result=drain_activity(store,data,config)
         elif args.command=='doctor':
             from .doctor import diagnose
+            repaired=store.rebuild_projections() if args.repair else None
             result=diagnose(store,data,vault=args.vault,config=args.config)
+            if repaired is not None:
+                result['repaired']=repaired
         elif args.command=='init':
             result={'data_dir':str(data),'external_sends':False}
         elif args.command=='capture':
@@ -174,6 +180,8 @@ def _run():
             payload=json.loads(args.file.read_text(encoding='utf-8'))
             items=payload if isinstance(payload,list) else payload['items']
             result=store.ingest(items,connector='import',checkpoint=payload.get('checkpoint') if isinstance(payload,dict) else None)
+        elif args.command=='forget':
+            result=store.forget(args.source)
         elif args.command in {'connect','collect'}:
             from .remote_mcp import remote_discover, remote_collect
             fn=remote_discover if args.command=='connect' else remote_collect

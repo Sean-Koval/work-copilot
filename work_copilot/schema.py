@@ -86,8 +86,13 @@ def backups(database_path) -> list:
     return sorted(folder.glob(f'{stem}-schema-v*-*.db'), key=lambda path: path.name.rsplit('-', 1)[-1]) if folder.is_dir() else []
 
 
-def prune_backups(database_path, max_age_days=BACKUP_MAX_AGE_DAYS, now=None) -> list:
-    """Delete schema backups older than ``max_age_days``; returns the removed paths."""
+def prune_backups(database_path, max_age_days=BACKUP_MAX_AGE_DAYS, now=None, dry_run=False) -> list:
+    """Delete schema backups older than ``max_age_days``; returns their paths.
+
+    With ``dry_run`` nothing is deleted, so the caller can remove each one and report a
+    file it could not remove. A file it can't remove now (Windows holds open files) is left
+    and tried again next time.
+    """
     now = now or datetime.now(timezone.utc)
     removed = []
     for path in backups(database_path):
@@ -96,7 +101,11 @@ def prune_backups(database_path, max_age_days=BACKUP_MAX_AGE_DAYS, now=None) -> 
         except ValueError:
             continue
         if (now - taken).days >= max_age_days:
-            path.unlink(missing_ok=True)
+            if not dry_run:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    continue
             removed.append(str(path))
     return removed
 
@@ -145,6 +154,9 @@ def migrate(db, database_path=None, target=None) -> dict:
         db.execute('BEGIN IMMEDIATE')
         try:
             MIGRATIONS[step](db)
+            # Projections are derived from the old schema: mark them for a rebuild in the same
+            # transaction, so a crash before the rebuild cannot leave them stale (KAN-388).
+            db.execute(STALE_PROJECTIONS)
             db.execute(f'PRAGMA user_version={step + 1}')
         except BaseException:
             db.rollback()
@@ -184,6 +196,10 @@ def export_jsonl(db, destination, exported_at) -> dict:
         raise
     return {'path': str(destination), 'schema_version': header['schema_version'], 'rows': counts}
 
+
+# Marks search and project links for a rebuild on the next open (KAN-388). An update, not a
+# delete, so the row keeps its place and a re-export lists rows in the same order.
+STALE_PROJECTIONS = """UPDATE local_metadata SET payload='{"version": null}' WHERE key='projections'"""
 
 SIDECARS = ('-wal', '-shm', '-journal')
 
@@ -246,6 +262,8 @@ def import_jsonl(source, database_path) -> dict:
                 counts[table] += 1
             if expected != counts:
                 raise ValueError('Export is incomplete: row counts differ from its header')
+            # Projections are not exported, so the first open must build them.
+            db.execute(STALE_PROJECTIONS)
             db.commit()
             migrated = migrate(db, None)
         finally:

@@ -191,6 +191,11 @@ class KeyringStorage:
         self._write('client', client_info.model_dump_json())
 
 
+DEFAULT_RETENTION_DAYS = 30
+CAPTURE_REQUIRED = ('Collection copies only rooms and spaces you pick: set capture.rooms (Symphony room ids) '
+                    'or capture.spaces (Confluence space keys) in the configuration; see docs/SYMPHONY_MCP.md')
+
+
 def load_config(path):
     """Validate local configuration before credentials, status writes or network I/O.
 
@@ -262,7 +267,35 @@ def load_config(path):
         raise ValueError('mapping.fields must map output names to nonempty dot-separated object paths')
     if not isinstance(mapping.get('constants', {}), dict):
         raise ValueError('mapping.constants must be a JSON object')
+    if 'capture' in config:
+        capture = config['capture']
+        if not isinstance(capture, dict) or set(capture) - {'rooms', 'spaces', 'retention_days'}:
+            raise ValueError('capture must be a JSON object with rooms, spaces and retention_days only')
+        for field in ('rooms', 'spaces'):
+            value = capture.setdefault(field, [])
+            if not isinstance(value, list) or len(value) > 500 or any(not isinstance(item, str) or not item.strip() for item in value):
+                raise ValueError('capture.' + field + ' must be a list of nonempty id strings')
+        capture.setdefault('retention_days', DEFAULT_RETENTION_DAYS)
+        if type(capture['retention_days']) is not int or not 1 <= capture['retention_days'] <= 365:
+            raise ValueError('capture.retention_days must be an integer from 1 to 365')
     return config
+
+
+def capture_settings(config):
+    """The rooms and spaces picked for capture, or None when none are (collection is then refused)."""
+    capture = config.get('capture')
+    return capture if capture and (capture['rooms'] or capture['spaces']) else None
+
+
+def select_captured(items, capture, known=lambda source_id: False):
+    """Keep items from picked Symphony rooms (``room_id``) or Confluence spaces (``space_key``) only (KAN-390).
+
+    An item for a source already stored is kept too, whatever it carries: a deletion marker
+    or an edit may come without its room, and dropping it would keep stale text.
+    """
+    rooms, spaces = set(capture['rooms']), set(capture['spaces'])
+    kept = [item for item in items if item.get('room_id') in rooms or item.get('space_key') in spaces or known(item.get('id'))]
+    return kept, len(items) - len(kept)
 
 
 def _identity(config, data_dir):
@@ -424,7 +457,16 @@ def _error_status(exc):
 async def _run_unlocked(store, config_path, data_dir, authorize, collect):
     config = load_config(config_path)
     name = config['name']
-    store.configure_connector(name, ['remote_mcp_http', 'oauth_pkce', 'explicit_read_allowlist', 'bounded_pagination'], 'Configured remote MCP; company-specific schema and coverage require verification. No complete cached ACL revocation or retention enforcement. Discovery alone does not imply source coverage.')
+    capture = capture_settings(config)
+    if collect and capture is None:
+        raise ValueError(CAPTURE_REQUIRED)
+    store.configure_connector(name, ['remote_mcp_http', 'oauth_pkce', 'explicit_read_allowlist', 'bounded_pagination', 'picked_rooms_and_spaces', 'retention_limit'], 'Configured remote MCP; company-specific schema and coverage require verification. No cached ACL revocation; text is kept for the configured retention limit. Discovery alone does not imply source coverage.')
+    retention = None
+    if capture is not None:
+        # Expire text past the limit on every run, before connecting, so a run that fails
+        # or only discovers tools still applies it (KAN-390).
+        store.set_retention(name, capture['retention_days'])
+        retention = store.apply_retention(name, capture['retention_days'])
     store.set_connector(name, 'catching_up')
     try:
         async with remote_session(config,data_dir,authorize) as session:
@@ -468,9 +510,11 @@ async def _run_unlocked(store, config_path, data_dir, authorize, collect):
                 seen.add(str(cursor)); arguments[config['cursor_argument']]=cursor
             else:
                 raise ValueError('Page limit reached; nothing committed, narrow scope or increase max_pages')
-            store.ingest(all_items, connector=name, checkpoint=final_checkpoint)
+            kept, skipped = select_captured(all_items, capture, known=store.has_source)
+            store.ingest(kept, connector=name, checkpoint=final_checkpoint)
+            retention = store.apply_retention(name, capture['retention_days'])
             store.set_connector(name,'healthy')
-            return {'items':len(all_items),'checkpoint':final_checkpoint,'status':'connected'}
+            return {'items':len(kept),'skipped_not_picked':skipped,'retention':retention,'checkpoint':final_checkpoint,'status':'connected'}
     except Exception as exc:
         status=_error_status(exc)
         # Never persist exception text: upstream errors may contain credentials or payloads.

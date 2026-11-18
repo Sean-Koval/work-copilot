@@ -9,7 +9,7 @@ Obtain approval to store the selected work data on this laptop. Ask your MCP adm
 - Streamable HTTP MCP endpoint (legacy SSE-only servers are not yet supported).
 - OAuth scopes and whether dynamic public-client registration is allowed. If not, request a public `client_id` registered for `http://127.0.0.1:8766/callback`; confidential client-secret flows are not implemented.
 - Read-only tool names, argument schemas and explicit permitted room/project scopes, pagination, stable IDs, revision timestamps, deletion markers, checkpoint/overlap semantics, and response shape.
-- Permission and retention behavior. This prototype does not simulate complete upstream ACL enforcement or immediately purge revoked cached evidence.
+- Permission and retention behavior. This prototype does not simulate complete upstream ACL enforcement. Local text is kept for the retention limit you set (below).
 
 Never paste access/refresh tokens, client secrets, or work messages into this repository. Config contains no credential values. Tools must both be locally allowlisted and advertise `readOnlyHint: true`; if the server does not expose this annotation, ask its administrator to verify and add it. An annotation is a server assertion, not a guarantee against a malicious server. No send/room-create tool is configured or called by this application.
 
@@ -77,6 +77,26 @@ The default result envelope is `{ "items": [normalized_sources], "next_cursor": 
 
 This mapping is deliberately simple: no code evaluation, no model, no automatic schema guessing. You must ensure the source ID includes tenant/account namespace and remains stable, and revision is meaningful. Nested arrays, ID composition and domain-specific ownership/intent extraction may require an administrator-reviewed adapter or normalized JSON import. A room mention is not user ownership. Many rooms and many projects can be linked through the normalized source contract.
 
+## Pick rooms and spaces, and how long text is kept
+
+Collection copies only the Symphony rooms and Confluence spaces you list. Without a list, `collect` is refused before any request:
+
+```json
+{
+  "capture": {"rooms": ["ROOM_ID"], "spaces": ["SPACE_KEY"], "retention_days": 30}
+}
+```
+
+An item is kept when its `room_id` is a listed room or its `space_key` is a listed space, so map those fields. An item for a source already stored is kept too, so its edits and deletions arrive. Everything else is skipped and counted. `doctor --config` shows the lists and the limit.
+
+Text older than `retention_days` (default 30) is removed on every `collect` or `connect`, failed or not, and when Work Copilot opens, at most once an hour. Age counts from `observed_at` or from when it was copied, whichever is earlier. The source keeps a pointer: its id, link, title, projects and a hash of the removed text. Drafts lose the passages they quoted. Obligations, with their titles, and evidence links stay.
+
+Older revisions, and sources deleted upstream, keep only a hash from the next run. The same text is cleared inside each schema backup in `backups/`, which is kept as a rollback copy under the usual backup cleanup.
+
+`work-copilot forget --source <id>` removes one source's text from the database: revisions, search, quoted passages in drafts, and the same text inside every schema backup. Obligations made from it keep their titles. Copies outside the database stay: JSONL exports, the generated wiki and knowledge records. A later collection does not copy it back.
+
+Removed text is overwritten in the database file. A file another program holds open can't be cleared at once; the result reports `wal_cleared` and `backups_left`, and the next run tries again. A backup that can't be cleared (held open or damaged) keeps its text until it is cleared on a later run or, at seven days old, deleted: that is the price of keeping a rollback copy.
+
 ```sh
 work-copilot collect --config ~/.config/work-copilot/symphony.json
 ```
@@ -87,7 +107,7 @@ A portable per-profile lock prevents overlapping browser/refresh/collection oper
 
 - No external sending, agent self-approval, or write tool execution.
 - No guarantee that your server's OAuth registration, scopes or Symphony tool schema matches these options until tested with your administrator.
-- No complete remote ACL/retention system: local cached evidence needs your organization's review and deletion policy.
+- No remote ACL system: removing a room from the list stops new copies, and its text expires with the retention limit or `forget`.
 - HTTPS required except loopback fixture servers. Local disk/backup encryption remains an OS responsibility.
 - Sanitized connection errors avoid exposing credentials; check endpoint/tool/scope/mapping and administrator server logs when collection fails.
 
