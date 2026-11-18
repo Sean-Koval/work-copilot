@@ -4,7 +4,18 @@ This is an early laptop prototype. **Python 3.11+ is required. Linux/Python 3.12
 
 ## 1. Install, then run the isolated check
 
-From a terminal with Git and Python installed:
+**One command, no clone.** With [uv](https://docs.astral.sh/uv/) (or pipx) and Git installed, on macOS, Windows or Linux:
+
+```sh
+uv tool install git+https://github.com/Sean-Koval/work-copilot
+work-copilot smoke
+```
+
+`pipx install git+https://github.com/Sean-Koval/work-copilot` works the same way. Without Git, use the archive: `uv tool install https://github.com/Sean-Koval/work-copilot/archive/refs/heads/main.zip`. If the shell then says `work-copilot` is not recognized, run `uv tool update-shell` (or `pipx ensurepath`) and open a new terminal. Upgrade with `uv tool upgrade work-copilot`. Then use `work-copilot` wherever this guide says `./run.sh`.
+
+This install takes the newest compatible dependencies, as CI's install check does; the clone's `run.sh` pins them with `constraints.txt`.
+
+**From a clone** (to read or change the code), from a terminal with Git and Python installed:
 
 ```sh
 git clone https://github.com/Sean-Koval/work-copilot.git
@@ -35,7 +46,15 @@ Check `py -3 --version` is 3.11 or newer first. macOS uses the shell commands ab
 
 Open **http://127.0.0.1:8765**. Review Today, This Week, project rooms/workstreams, waiting items, source passages and an offline reply draft. Copying or marking a local question sent does not send a message. Stop the service with Ctrl+C; restarting retains demo state.
 
-Demo state defaults to `~/.local/share/work-copilot-demo`; real state uses the separate `~/.local/share/work-copilot` (or the equivalent directories under `$XDG_DATA_HOME`). Neither belongs in the public checkout. To choose another private location, put `--data-dir` **before** the command:
+Demo state defaults to a `work-copilot-demo` folder; real state uses a separate `work-copilot` folder beside it:
+
+| OS | Folder |
+| --- | --- |
+| Windows | `%LOCALAPPDATA%` (usually `C:\Users\you\AppData\Local`) |
+| macOS | `~/Library/Application Support` |
+| Linux | `~/.local/share` |
+
+`$XDG_DATA_HOME` wins on any OS when set. On macOS and Windows, a folder that an earlier version left in `~/.local/share` keeps being used, and `doctor` reports it as `data_dir_note`; nothing is moved. Neither folder belongs in the public checkout. To choose another private location, put `--data-dir` **before** the command:
 
 ```sh
 ./run.sh --data-dir /absolute/private/copilot-demo demo
@@ -81,7 +100,7 @@ After installation, add a stdio MCP server using your client's supported configu
 }
 ```
 
-On Windows the Python executable is `.venv/Scripts/python.exe` (escape backslashes if using them in JSON). Omit `WORK_COPILOT_VAULT` if you do not want the agent to have the local `capture_note` tool. Explicit local tools can create projects, capture selected notes, track obligations and review local records. They cannot authorize or send external messages.
+On Windows the Python executable is `.venv/Scripts/python.exe` (escape backslashes if using them in JSON). With the one-command install, set `command` to the absolute path of `work-copilot` (`which work-copilot` on macOS or Linux, `(Get-Command work-copilot).Source` in PowerShell) and drop `"-m", "work_copilot"` from `args`. Omit `WORK_COPILOT_VAULT` if you do not want the agent to have the local `capture_note` tool. Explicit local tools can create projects, capture selected notes, track obligations and review local records. They cannot authorize or send external messages.
 
 Ask the client to list projects, retrieve one source passage, then track a fictional waiting item before using sensitive work context. Inspect the receipt and dashboard. The client—not this service—interprets natural language and chooses its model. Running this store locally does **not** guarantee your client's model processes data locally; obtain the required company approval first.
 

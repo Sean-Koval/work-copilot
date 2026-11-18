@@ -7,9 +7,40 @@ from pathlib import Path
 import sys
 
 
+def _legacy_data_dir(demo=False):
+    return Path.home()/'.local'/'share'/('work-copilot-demo' if demo else 'work-copilot')
+
+
+def _holds_data(path):
+    # The database, not any file: a stray .DS_Store or Thumbs.db must not pick the folder.
+    try:
+        return (path/'copilot.db').is_file()
+    except OSError:
+        return False
+
+
 def default_data_dir(demo=False):
-    base = Path(os.environ.get('XDG_DATA_HOME', Path.home()/'.local'/'share'))
-    return base / ('work-copilot-demo' if demo else 'work-copilot')
+    """Used when --data-dir is not given: $XDG_DATA_HOME on any OS, else the OS's per-user data folder:
+    %LOCALAPPDATA% on Windows, ~/Library/Application Support on Mac, ~/.local/share elsewhere.
+    On Mac and Windows an older ~/.local/share folder that already holds data stays in use; it is never moved."""
+    name='work-copilot-demo' if demo else 'work-copilot'
+    if os.environ.get('XDG_DATA_HOME'):
+        return Path(os.environ['XDG_DATA_HOME'])/name
+    if sys.platform=='win32':
+        base=Path(os.environ.get('LOCALAPPDATA') or Path.home()/'AppData'/'Local')
+    elif sys.platform=='darwin':
+        base=Path.home()/'Library'/'Application Support'
+    else:
+        return _legacy_data_dir(demo)
+    legacy=_legacy_data_dir(demo)
+    return legacy if _holds_data(legacy) and not _holds_data(base/name) else base/name
+
+
+def legacy_data_note(data, demo=False):
+    """Say why Mac or Windows still uses the older folder, so doctor explains it instead of starting empty elsewhere."""
+    if sys.platform in {'win32','darwin'} and not os.environ.get('XDG_DATA_HOME') and Path(data)==_legacy_data_dir(demo).expanduser().resolve():
+        return f'Using the existing data folder {data} from an earlier version. It is kept as is; pass --data-dir to choose another folder.'
+    return None
 
 
 def _review_options(p):
@@ -85,7 +116,10 @@ def _run():
     data=(args.data_dir or default_data_dir(args.command=='demo')).expanduser().resolve()
     if args.command=='doctor' and not args.repair:
         from .doctor import diagnose_path
-        print(json.dumps(diagnose_path(data,vault=args.vault,config=args.config,timezone_name=args.timezone),indent=2,default=str))
+        report=diagnose_path(data,vault=args.vault,config=args.config,timezone_name=args.timezone)
+        if args.data_dir is None and (note:=legacy_data_note(data)):
+            report['data_dir_note']=note
+        print(json.dumps(report,indent=2,default=str))
         return
     data.mkdir(parents=True,exist_ok=True,mode=0o700)
     if os.name=='posix':
