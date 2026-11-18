@@ -50,6 +50,23 @@ def _database_details(db):
     return integrity,connectors,projects
 
 
+def _backup_status(database_path):
+    from .schema import backups, BACKUP_MAX_AGE_DAYS
+    found=backups(database_path)
+    oldest=found[0].name.rsplit('-',1)[-1].removesuffix('.db') if found else None
+    return {'count':len(found),'oldest':oldest,'folder':str(Path(database_path).parent/'backups'),'note':f'Pre-migration copies of all captured text; removed after {BACKUP_MAX_AGE_DAYS} days.'}
+
+
+def _schema_status(user_version):
+    from .schema import SCHEMA_VERSION
+    if user_version>SCHEMA_VERSION:
+        return {'ok':False,'status':'newer_schema','schema_version':user_version,'supported_schema_version':SCHEMA_VERSION,'note':'This database was written by a newer Work Copilot; upgrade before opening it.'}
+    status={'schema_version':user_version,'supported_schema_version':SCHEMA_VERSION}
+    if user_version<SCHEMA_VERSION:
+        status['schema_note']='The next start migrates this database, after copying it to backups/.'
+    return status
+
+
 def _result(directory, database, connectors, projects, timezone_name, vault, config):
     checks={**_runtime_checks(),
         'database':database,
@@ -135,9 +152,12 @@ def _diagnose_path(data_dir, vault, config, timezone_name, database_path):
                     db=sqlite3.connect(copied.as_uri()+'?mode=ro',uri=True)
                     try:
                         integrity,connectors,projects=_database_details(db)
+                        user_version=db.execute('PRAGMA user_version').fetchone()[0]
                     finally:
                         db.close()
                     database.update(ok=integrity=='ok',status='ready' if integrity=='ok' else 'corrupt',integrity=integrity,note='Read-only check of a private temporary DB/WAL snapshot; original files unchanged.')
+                    database.update(_schema_status(user_version))
+                    database['backups']=_backup_status(path)
     except (OSError,sqlite3.Error,ValueError,TypeError):
         database.update(ok=False,status='unreadable_or_invalid',note='Database is unreadable, incompatible or corrupt. Check permissions and restore a verified backup; doctor made no repairs.')
         connectors=[];projects=0

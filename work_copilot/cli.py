@@ -49,7 +49,8 @@ def _run():
         elif name=='capture':
             p.add_argument('vault',type=Path)
         elif name=='export':
-            p.add_argument('vault',type=Path,nargs='?',help='Regenerate the project wiki in this vault (omit with --to)')
+            p.add_argument('vault',type=Path,nargs='?',help='Regenerate the project wiki in this vault (omit with --to or --jsonl)')
+            p.add_argument('--jsonl',type=Path,help='Write all local state to this JSONL file (a portable backup; restore with import --jsonl)')
             p.add_argument('--to',type=Path,default=os.environ.get('WORK_COPILOT_KNOWLEDGE_REPO'),help='Local knowledge repository; Source records go to its inbox/. Default: WORK_COPILOT_KNOWLEDGE_REPO')
             p.add_argument('--since',help='Export sources observed at or after this ISO timestamp with timezone')
             p.add_argument('--owner',default=os.environ.get('WORK_COPILOT_KNOWLEDGE_OWNER'),help='Record owner. Default: WORK_COPILOT_KNOWLEDGE_OWNER')
@@ -58,7 +59,8 @@ def _run():
             p.add_argument('--repo',type=Path,default=os.environ.get('WORK_COPILOT_KNOWLEDGE_REPO'),help='Local clone of the knowledge repository (read only). Default: WORK_COPILOT_KNOWLEDGE_REPO')
             _review_options(p)
         elif name=='import':
-            p.add_argument('file',type=Path,help='Normalized JSON envelope or source array')
+            p.add_argument('file',type=Path,nargs='?',help='Normalized JSON envelope or source array')
+            p.add_argument('--jsonl',type=Path,help='Restore a JSONL export into an empty --data-dir')
         elif name in {'connect','collect'}:
             p.add_argument('--config',type=Path,required=True)
             p.add_argument('--authorize',action='store_true',help='Explicitly initiate OAuth in browser; only approved company server')
@@ -117,6 +119,19 @@ def _run():
         uvicorn.run(create_app(data,demo=args.command=='demo',vault=args.vault,connector_config=args.connector_config,review_queue=review_settings),host='127.0.0.1',port=args.port)
         return
     from .store import Store
+    if args.command=='import' and (args.jsonl is None)==(args.file is None):
+        parser.error('import takes exactly one of: a source file, or --jsonl <export>')
+    if args.command=='export' and args.jsonl and args.vault:
+        parser.error('export --jsonl writes local state only; omit the vault')
+    if args.command=='import' and args.jsonl:
+        try:
+            store,result=Store.import_jsonl(args.jsonl,data/'copilot.db')
+            store.close()
+        except (ValueError,OSError) as exc:
+            print(f'Error: {exc}',file=sys.stderr)
+            raise SystemExit(1)
+        print(json.dumps(result,indent=2,default=str))
+        return
     store=Store(data/'copilot.db')
     try:
         if args.command=='activity':
@@ -140,6 +155,8 @@ def _run():
             from .vault import capture_vault, export_projects
             result=capture_vault(store,args.vault)
             result['export']=export_projects(store,args.vault)
+        elif args.command=='export' and args.jsonl:
+            result=store.export_jsonl(args.jsonl)
         elif args.command=='export' and args.vault is None:
             if args.to is None:
                 raise ValueError('Give a vault for the project wiki, or --to <knowledge repo> for Source records')
