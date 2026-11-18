@@ -130,6 +130,7 @@ def test_export_then_import_round_trips_with_no_loss(tmp_path):
     assert json.loads(lines[0])['kind'] == schema.EXPORT_KIND and len(lines) == 1 + sum(exported['rows'].values())
     restored, result = Store.import_jsonl(tmp_path / 'state.jsonl', tmp_path / 'b' / 'copilot.db', now=NOW)
     assert result['rows'] == exported['rows']
+    assert result['path'] == str((tmp_path / 'b' / 'copilot.db').resolve())
     assert _rows(tmp_path / 'a' / 'copilot.db') == _rows(tmp_path / 'b' / 'copilot.db')
     before, after = original.snapshot(), restored.snapshot()
     assert after == before
