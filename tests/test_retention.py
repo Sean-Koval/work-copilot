@@ -26,7 +26,7 @@ def message(number, revision='1', body=SECRET, observed=START, **extra):
     return {'id': f'symphony:room-1:{number}', 'revision': revision, 'provider': 'symphony', 'title': f'Message {number}',
             'body': body, 'url': f'https://chat.example.invalid/m/{number}', 'room_id': 'room-1', 'observed_at': observed.isoformat(),
             'projects': [{'id': 'atlas', 'name': 'Atlas'}],
-            'obligations': [{'intent_key': f'reply-{number}', 'title': 'Reply about the numbers', 'project_id': 'atlas', 'owner': 'me'}], **extra}
+            'obligations': [{'intent_key': f'symphony:room-1:{number}:reply', 'title': 'Reply about the numbers', 'project_id': 'atlas', 'owner': 'me'}], **extra}
 
 
 @pytest.fixture
@@ -97,13 +97,17 @@ def test_retention_touches_only_its_connector(store):
 def test_forget_removes_a_source_its_text_and_backups(store, tmp_path):
     store.ingest([message(1), message(2, body='Other text')], connector='symphony')
     backup = schema.backup(store.db, store.path, 'schema-v1')
-    obligation = next(o for o in store.snapshot()['obligations'] if o['intent_key'] == 'reply-1')
+    obligation = next(o for o in store.snapshot()['obligations'] if o['intent_key'] == 'symphony:room-1:1:reply')
     report = store.forget('symphony:room-1:1')
     assert report == {'forgotten': 'symphony:room-1:1', 'stale_drafts': 0, 'wal_cleared': True,
                       'backups_cleared': 1, 'backups_removed': 0, 'backups_left': 0}
     # The backup is kept as a rollback copy, without the forgotten source.
     assert backup.exists() and SECRET.encode() not in backup.read_bytes()
-    assert 'Other text' in _dump(backup) and 'symphony:room-1:1' not in _dump(backup)
+    assert 'Other text' in _dump(backup)
+    # The obligation stays (with its title), and its intent key names the source (KAN-392);
+    # no other row of the backup still mentions the forgotten source.
+    mentions = [line for line in _dump(backup).splitlines() if 'symphony:room-1:1' in line]
+    assert mentions and all(line.startswith('INSERT INTO "obligations"') for line in mentions)
     assert store.source('symphony:room-1:1') is None and not store.search('confidential')
     assert store.obligation(obligation['id'])['evidence'] == []
     assert store.ingest([message(1)], connector='symphony')['forgotten'] == 1
@@ -251,7 +255,7 @@ def test_expiry_clears_text_inside_backups_and_keeps_them(store, tmp_path):
     store.ingest([message(1, revision='2', observed=START + timedelta(hours=1))], connector='symphony')
     store.clock.value = START + timedelta(hours=2)
     store.ingest([message(2, revision='2', body='Still current, edited', observed=START + timedelta(hours=2))], connector='symphony')
-    obligation = next(o for o in store.snapshot()['obligations'] if o['intent_key'] == 'reply-1')
+    obligation = next(o for o in store.snapshot()['obligations'] if o['intent_key'] == 'symphony:room-1:1:reply')
     store.draft(obligation['id'])
     # A pre-upgrade backup, taken while all of that text was live.
     backup = schema.backup(store.db, store.path, 'schema-v1')

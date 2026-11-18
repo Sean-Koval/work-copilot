@@ -31,7 +31,7 @@ SOURCES = [
      'body': 'Agreed: ticket titles start with the repository name and a colon.\nThanks all.',
      'url': 'https://chat.example.invalid/rooms/team/threads/42', 'observed_at': '2026-11-06T10:12:00+00:00',
      'projects': [{'id': 'atlas', 'name': 'Atlas'}],
-     'obligations': [{'intent_key': 'rename-tickets', 'title': 'Rename open tickets', 'project_id': 'atlas', 'owner': None, 'status': 'candidate'}]},
+     'obligations': [{'intent_key': 'symphony:tenant:thread:42:rename-tickets', 'title': 'Rename open tickets', 'project_id': 'atlas', 'owner': None, 'status': 'candidate'}]},
     {'id': 'zoom:tenant:meeting:7', 'revision': '1', 'provider': 'zoom', 'title': 'Weekly planning call',
      'body': "Speaker 1: Let's keep releases on Thursdays.\nSpeaker 2: I'll share the release notes by Friday.\n",
      'observed_at': '2026-11-10T15:00:00-05:00', 'url': 'file:///private/path/transcript.vtt'},
@@ -148,7 +148,7 @@ def test_dedupe_hashes_the_envelope_without_revision(store, repo):
     store.ingest([dict(SOURCES[0], revision='5')])
     assert export_sources(store, repo, owner='sean', now=NOW)['written'] == []
     # A changed obligation needs a new revision, and gives a new record.
-    changed = [{'intent_key': 'rename-tickets', 'title': 'Rename open tickets', 'status': 'open'}]
+    changed = [{'intent_key': 'symphony:tenant:thread:42:rename-tickets', 'title': 'Rename open tickets', 'status': 'open'}]
     with pytest.raises(ValueError, match='revision'):
         store.ingest([dict(SOURCES[0], revision='5', obligations=changed)])
     store.ingest([dict(SOURCES[0], revision='6', obligations=changed)])

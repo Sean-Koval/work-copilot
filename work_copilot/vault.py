@@ -15,6 +15,8 @@ from pathlib import Path
 from datetime import datetime, timezone
 from urllib.parse import urlparse, quote
 
+from .ids import ASK_KIND, parse_intent_key, validate_source_id
+
 GENERATED_DIR = 'Work Copilot Generated'
 _MARKER = '.work-copilot-generated.json'
 _MAX_NOTE = 2_000_000
@@ -188,6 +190,12 @@ def _capture_vault_unlocked(store, root) -> dict:
                 obligations = meta.get('obligations', [])
                 if not isinstance(obligations, list) or not all(isinstance(o, dict) for o in obligations):
                     raise ValueError('obligations in the pasted frontmatter must be a JSON array of objects')
+                # A bare ask kind in a note (intent_key: reply) is an ask from that note.
+                obligations = [{**o, 'intent_key': f"{sid}:{o['intent_key']}"} if isinstance(o.get('intent_key'), str) and ASK_KIND.fullmatch(o['intent_key']) else o for o in obligations]
+                # Refuse a bad id or key here, so one note is reported instead of failing the whole capture.
+                validate_source_id(sid, 'vault')
+                for obligation in obligations:
+                    parse_intent_key(obligation.get('intent_key'))
                 suggestions = []
                 if not ids:
                     for project in known_projects:
@@ -196,9 +204,11 @@ def _capture_vault_unlocked(store, root) -> dict:
                             suggestions.append(project)
                 suggestion_note = (' (possible: ' + ', '.join(p.get('name', p['id']) for p in suggestions) + '; review required)') if suggestions else ''
                 if not ids:
-                    obligations = [*obligations, {'intent_key': f'map:{sid}', 'title': f'Review project mapping: {relative}{suggestion_note}', 'owner': None, 'status': 'candidate'}]
+                    obligations = [*obligations, {'intent_key': f'{sid}:map', 'title': f'Review project mapping: {relative}{suggestion_note}', 'owner': None, 'status': 'candidate'}]
                 content_hash = hashlib.sha256(raw).hexdigest()
-                extraction_hash = hashlib.sha256(json.dumps([(p['id'],p.get('name')) for p in suggestions]).encode()).hexdigest()
+                # Derived obligations are part of the extraction: when the way they are derived changes
+                # (KAN-392 turned a bare kind into <sid>:<kind>), an unchanged note gets a new revision.
+                extraction_hash = hashlib.sha256(json.dumps([[(p['id'],p.get('name')) for p in suggestions], obligations], sort_keys=True).encode()).hexdigest()
                 previous = prior.get(sid, {})
                 if previous.get('content_hash') == content_hash and previous.get('extraction_hash') == extraction_hash and not previous.get('deleted'):
                     revision = previous['revision']

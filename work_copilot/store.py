@@ -17,6 +17,7 @@ from .join_key import FIELDS as JOIN_FIELDS, join_fields, neutralise
 from .knowledge import ENVELOPE_VERSION, validate_envelope
 from . import schema
 from .rules import Rules
+from .ids import intent_key as make_intent_key, is_intent_key, parse_intent_key, tracked_intent_key, validate_source_id
 
 
 class ConflictError(ValueError):
@@ -432,12 +433,15 @@ class Store:
                 # The shared Source contract (schema_version 1) covers id, revision,
                 # provider, title, body, observed_at, obligations and url.
                 validate_envelope(source)
+                validate_source_id(source['id'],source['provider'])
                 source.setdefault('projects',[])
                 source.setdefault('obligations',[])
                 source.setdefault('deleted',False)
                 source.setdefault('url',None)
                 if not isinstance(source['projects'],list) or not isinstance(source['obligations'],list):
                     raise ValueError('Projects and obligations must be lists')
+                for candidate in source['obligations']:
+                    parse_intent_key(candidate['intent_key'])
                 if self.db.execute('SELECT 1 FROM local_metadata WHERE key=?',('forgotten:'+source['id'],)).fetchone():
                     # The user asked to forget this source; a later collection does not copy it back.
                     result['forgotten']=result.get('forgotten',0)+1
@@ -474,10 +478,13 @@ class Store:
                     for candidate in source['obligations']:
                         if 'owner' in candidate:
                             candidate={**candidate,'owner':self.rules.owner(candidate['owner'])}
-                        canonical=_json([candidate.get('project_id'),candidate['intent_key']])
+                        # The intent key names its source and site, so it alone is the identity.
+                        canonical=candidate['intent_key']
                         existing_row=self.db.execute('SELECT obligation_id FROM source_intents WHERE source_id=? AND candidate_key=?',(source['id'],canonical)).fetchone()
                         if not existing_row:
                             existing_row=self.db.execute('SELECT id FROM obligations WHERE canonical=?',(canonical,)).fetchone()
+                        if not existing_row:
+                            existing_row=self._legacy_source_intent(source['id'],candidate)
                         oid=existing_row[0] if existing_row else _id(canonical)
                         if not existing_row and self.db.execute('SELECT 1 FROM obligations WHERE id=?',(oid,)).fetchone():
                             oid=_id(canonical+str(uuid4()))
@@ -489,7 +496,7 @@ class Store:
                             self.db.execute('INSERT INTO obligations VALUES(?,?,?)',(oid,canonical,_json(ob)))
                         if exists:
                             current=self._obligation(oid)
-                            changed=[key for key in ('title','owner','status','question_state','due_at','follow_up_at','waiting_on','commitment') if key in candidate and candidate[key]!=current.get(key)]
+                            changed=[key for key in ('title','owner','project_id','status','question_state','due_at','follow_up_at','waiting_on','commitment') if key in candidate and candidate[key]!=current.get(key)]
                             if changed:
                                 current['review_reason']='New source differs on '+', '.join(changed)+'. Existing reviewed state is preserved.'
                                 current['revision']+=1
@@ -512,6 +519,38 @@ class Store:
                 value['checkpoint']=checkpoint
             self._put_connector(value)
         return result
+
+    def _legacy_source_intent(self, source_id, candidate):
+        """The obligation this source recorded for ``candidate`` before KAN-392, if any.
+
+        Before KAN-392 a source's ask was keyed ``[project_id, intent_key]`` and a vault note
+        stored a bare kind (``reply``) or ``map:<source id>``. An ask from the source itself
+        (``<source id>:<kind>``) adopts that row, which keeps its id and stored key; the new
+        key is recorded as an alias in source_intents by the caller.
+        """
+        source,kind=parse_intent_key(candidate['intent_key'])
+        if source!=source_id:
+            return None
+        legacy={kind,f'{kind}:{source_id}'}
+        rows=self.db.execute('SELECT candidate_key,obligation_id FROM source_intents WHERE source_id=?',(source_id,)).fetchall()
+        matches=[]
+        for row in rows:
+            try:
+                key=json.loads(row['candidate_key'])
+            except ValueError:
+                continue
+            if isinstance(key,list) and len(key)==2 and key[1] in legacy:
+                matches.append((key[0]!=candidate.get('project_id'),row['obligation_id']))
+        return (min(matches)[1],) if matches else None
+
+    def _flag_project_change(self, ob, project_id):
+        """An ask met again under another project is kept and sent to review, never refused."""
+        if project_id==ob.get('project_id'):
+            return ob
+        ob['review_reason']=f"Tracked again for project {project_id or 'none'}; this record is in {ob.get('project_id') or 'no project'}. Existing reviewed state is preserved."
+        ob['revision']+=1
+        self._put_obligation(ob)
+        return self._obligation(ob['id'])
 
     @staticmethod
     def _validate_changes(changes):
@@ -544,7 +583,8 @@ class Store:
                 raise ConflictError('Obligation changed; reload before reviewing')
             if changes.get('project_id') and not self.db.execute('SELECT 1 FROM projects WHERE id=?',(changes['project_id'],)).fetchone():
                 raise ValueError('Unknown project; import an explicit project first')
-            if 'project_id' in changes:
+            if 'project_id' in changes and not is_intent_key(ob['intent_key']):
+                # Records stored before KAN-392 keep their (project, intent) identity.
                 canonical=_json([changes['project_id'],ob['intent_key']])
                 duplicate=self.db.execute('SELECT id FROM obligations WHERE canonical=? AND id!=?',(canonical,id)).fetchone()
                 if duplicate:
@@ -794,8 +834,9 @@ class Store:
 
         ``tracker``, ``work_id`` and ``session_key`` are the ai-dlc session join key
         (KAN-383); they are kept only on the call that creates the record. A repeat
-        call with the same project and ``intent_key`` returns the existing record as
-        it is, so a different tracker on the repeat is ignored, not combined with the first.
+        call with the same ``intent_key`` returns the existing record (flagged for review
+        when it names another project, KAN-392), so a different tracker on the repeat is
+        ignored, not combined with the first.
         """
         allowed={'intent_key','title','project_id','owner','status','waiting_on','follow_up_at','due_at','question_state','commitment','evidence_ids','body',*JOIN_FIELDS}
         if not isinstance(payload,dict) or set(payload)-allowed or not all(isinstance(payload.get(k),str) and payload[k].strip() for k in ('intent_key','title')):
@@ -805,6 +846,7 @@ class Store:
             raise ValueError('Body must be text of at most 100000 characters')
         join=join_fields(payload)
         candidate={k:v for k,v in payload.items() if k not in ('evidence_ids','body',*JOIN_FIELDS)}
+        candidate['intent_key']=tracked_intent_key(payload['intent_key'])
         candidate.setdefault('owner',self.rules.self_owner); candidate.setdefault('status','waiting')
         candidate['owner']=self.rules.owner(candidate['owner'])
         self._validate_changes(candidate)
@@ -824,13 +866,19 @@ class Store:
                     project={'id':candidate['project_id'],'name':candidate['project_id']}
                 else:
                     project=dict(row)
-            canonical=_json([candidate.get('project_id'),candidate['intent_key']])
+            canonical=candidate['intent_key']
             existing=self.db.execute('SELECT id FROM obligations WHERE canonical=?',(canonical,)).fetchone()
+            if not existing:
+                # Tracked before KAN-392: keyed [project_id, intent_key as given].
+                existing=self.db.execute('SELECT id FROM obligations WHERE canonical=?',(_json([candidate.get('project_id'),payload['intent_key']]),)).fetchone()
             if existing:
-                return self._obligation(existing[0])
+                current=self._obligation(existing[0])
+                if candidate.get('project_id'):
+                    current=self._flag_project_change(current,candidate['project_id'])
+                return current
             # Free text never carries a join key line: only the one written from ``join`` does.
             session=('\n\nWork-Session: '+join['session_key']) if join else ''
-            source={'id':'local/obligation/'+_id(canonical),'revision':'1','provider':'local-user','title':'User-entered obligation: '+candidate['title'],'body':neutralise('Explicitly entered by the local user. '+candidate['title']+('\n\n'+body if body else ''))+session,'projects':[project] if project else [],'obligations':[candidate]}
+            source={'id':'local-user:local:obligation/'+_id(canonical),'revision':'1','provider':'local-user','title':'User-entered obligation: '+candidate['title'],'body':neutralise('Explicitly entered by the local user. '+candidate['title']+('\n\n'+body if body else ''))+session,'projects':[project] if project else [],'obligations':[candidate]}
             if join:
                 source['join']=join
             self.ingest([source],connector='local-user')
@@ -859,11 +907,17 @@ class Store:
                     raise ValueError('Review items need key, title, body, revision and opened_at')
                 _instant(item['opened_at'])
                 self._validate_changes({k:item.get(k) for k in ('title','due_at')})
-                sid='review/'+item['key']
+                sid=validate_source_id(connector+':local:'+item['key'])
+                intent=make_intent_key(sid,'review')
                 url=item.get('url') if isinstance(item.get('url'),str) and item['url'].startswith(('https://','http://')) else None
                 self.ingest([{'id':sid,'revision':item['revision'],'provider':connector,'title':item['title'],'body':item['body'],'url':url,'observed_at':observed}],connector=connector)
-                canonical=_json([None,'review:'+item['key']])
+                canonical=intent
                 row=self.db.execute('SELECT id FROM obligations WHERE canonical=?',(canonical,)).fetchone()
+                if not row:
+                    # Stored before KAN-392 as [null, "review:<key>"] with source review/<key>; adopt it.
+                    row=self.db.execute('SELECT id FROM obligations WHERE canonical=?',(_json([None,'review:'+item['key']]),)).fetchone()
+                    if row:
+                        self.db.execute('DELETE FROM evidence WHERE obligation_id=? AND source_id=?',(row[0],'review/'+item['key']))
                 values={k:item.get(k) for k in fields} | {'url':url}
                 if row:
                     ob=self._obligation(row[0])
@@ -877,7 +931,7 @@ class Store:
                     oid=ob['id']
                 else:
                     oid=_id(canonical)
-                    ob={'id':oid,'intent_key':'review:'+item['key'],'kind':'review',**values,'project_id':None,'owner':self.rules.self_owner,'status':'open','question_state':'pending','follow_up_at':None,'waiting_on':None,'commitment':False,'revision':1,'created_at':self.now().isoformat(),'reviewed':True}
+                    ob={'id':oid,'intent_key':intent,'kind':'review',**values,'project_id':None,'owner':self.rules.self_owner,'status':'open','question_state':'pending','follow_up_at':None,'waiting_on':None,'commitment':False,'revision':1,'created_at':self.now().isoformat(),'reviewed':True}
                     self.db.execute('INSERT INTO obligations VALUES(?,?,?)',(oid,canonical,_json(ob)))
                     opened.append(oid)
                 self.db.execute('INSERT OR IGNORE INTO evidence VALUES(?,?)',(oid,sid))

@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from test_knowledge import record_errors
+from work_copilot.ids import ask_kind
 from work_copilot.knowledge import parse_frontmatter
 from work_copilot.store import Store
 from work_copilot.vault import write_inbox_note
@@ -42,7 +43,7 @@ def test_plain_capture_is_a_valid_source_record(vault, monkeypatch):
     assert payload.startswith('\n# Standup\n\nDecision: staging first.\n')
     # No project: Work Copilot still asks for a project mapping, as before.
     source = store.list_sources()[0]
-    assert any(o['intent_key'].startswith('map:') for o in source['obligations'])
+    assert any(ask_kind(o['intent_key']) == 'map' for o in source['obligations'])
 
 
 def test_projects_and_workstream_round_trip_through_links_and_tags(vault, monkeypatch):
@@ -106,7 +107,7 @@ def test_pasted_fields_the_header_cannot_hold_reach_the_store(vault):
             '"project_id":"atlas","status":"open"}]\n---\nx')
     receipt = write_inbox_note(store, root, 'Pasted', body)
     source = next(s for s in store.list_sources() if s['id'] == receipt['source_ids'][0])
-    held = next(o for o in source['obligations'] if o['intent_key'] == 'r1')
+    held = next(o for o in source['obligations'] if ask_kind(o['intent_key']) == 'r1')
     assert (held['owner'], held['due_at'], held['project_id']) == ('me', '2026-12-01T00:00:00+00:00', 'atlas')
 
 
@@ -166,7 +167,7 @@ def test_a_pasted_block_quoted_in_the_body_gives_no_fields(vault):
     path.write_text(text + '\nQuoted:\n## Pasted frontmatter\n\n```yaml\nobligations: [{"intent_key":"k","title":"T","owner":"mallory"}]\n```\n\nmore', encoding='utf-8')
     capture_vault(store, root)
     source = next(s for s in store.list_sources() if s['id'] == receipt['source_ids'][0])
-    assert next(o for o in source['obligations'] if o['intent_key'] == 'k').get('owner') is None
+    assert next(o for o in source['obligations'] if ask_kind(o['intent_key']) == 'k').get('owner') is None
 
 
 def test_a_hand_written_type_key_reads_as_before(vault):
