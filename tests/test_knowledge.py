@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 import sys
+import tomllib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -12,7 +13,9 @@ from jsonschema import Draft202012Validator
 
 from work_copilot.knowledge import (
     ENVELOPE_VERSION,
+    OBLIGATION_STATUSES,
     RECORD_FORMAT_VERSION,
+    SCOPES,
     export_sources,
     parse_frontmatter,
     validate_envelope,
@@ -24,6 +27,9 @@ CONTRACT = Path(__file__).parent / 'contracts' / 'knowledge-record.schema.json'
 # ai-dlc contracts/knowledge-record.schema.json at commit c217bd0 (main, 2026-11-17; adds retracts and quote fields).
 # Refresh the copy and this hash together when the contract changes.
 CONTRACT_SHA256 = 'eda789937b670f3bc527ebffc366464af650bf3464defab33e084b0409444f59'
+# ai-dlc contracts/knowledge-record.versions.toml, copied with the schema (KAN-504): it
+# publishes the canonical SHA-256 of the schema for each FORMAT_VERSION.
+VERSIONS = CONTRACT.with_name('knowledge-record.versions.toml')
 FIXTURES = Path(__file__).parent / 'fixtures' / 'knowledge_export'
 NOW = datetime(2026, 11, 12, 18, 0, tzinfo=timezone.utc)
 SOURCES = [
@@ -81,6 +87,28 @@ def test_vendored_contract_is_the_pinned_copy():
     for field in ('schema_version', 'revision', 'provider', 'title', 'observed_at', 'obligations', 'url'):
         assert field in published['properties']
     assert published['properties']['schema_version']['anyOf'][0]['const'] == ENVELOPE_VERSION
+
+
+def canonical_sha256(value):
+    """The hash ai-dlc publishes: canonical JSON, sorted keys, no spaces, UTF-8."""
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode('utf-8')).hexdigest()
+
+
+def test_vendored_contract_matches_a_published_format_version():
+    published = schema()
+    versions = tomllib.loads(VERSIONS.read_text(encoding='utf-8'))['versions']
+    claimed = versions[str(published['x-format-version'])]
+    digest = canonical_sha256(published)
+    assert digest not in claimed.get('superseded', []), 'vendored schema is a stale copy of its format version'
+    assert digest == claimed['sha256']
+    assert str(RECORD_FORMAT_VERSION) in versions
+
+
+def test_scopes_and_statuses_come_from_the_contract():
+    properties = schema()['properties']
+    obligation = schema()['$defs']['Obligation']['properties']
+    assert tuple(properties['scope']['enum']) == SCOPES
+    assert tuple(obligation['status']['anyOf'][0]['enum']) == OBLIGATION_STATUSES
 
 
 def test_exported_records_match_the_contract_and_fixtures(store, repo):
