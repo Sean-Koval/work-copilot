@@ -95,6 +95,8 @@ The database records its schema version. When a new Work Copilot changes the sch
 
 A backup holds all captured text, so the five newest are kept and any older than 30 days is deleted on the next start.
 
+Search and project links are kept current as records arrive, so a normal start does not rebuild them. If search ever looks wrong, `doctor --repair` rebuilds them from the recorded state; it changes nothing else.
+
 To back up or move everything, `work-copilot --data-dir <dir> export --jsonl state.jsonl` writes all local state to one JSONL file. `work-copilot --data-dir <new empty dir> import --jsonl state.jsonl` restores it; import never merges into or overwrites an existing database. The file holds your captured work text, so keep it in the same approved storage as the data folder.
 
 ### Common first-run issues

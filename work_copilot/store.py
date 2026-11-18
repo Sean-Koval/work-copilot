@@ -39,6 +39,11 @@ def _id(value):
     return hashlib.sha256(value.encode()).hexdigest()[:24]
 
 
+# Bump when what _index_source writes or how source_projects is derived changes: the next
+# open then rebuilds both once, without a schema migration.
+PROJECTION_VERSION=1
+
+
 class Store:
     def __init__(self, path, now=None, timezone_name=None, rules=None):
         self.timezone_name=timezone_name or os.environ.get("WORK_COPILOT_TIMEZONE", "UTC")
@@ -72,11 +77,13 @@ class Store:
         self.migration=schema.migrate(self.db,self.path)
         # Backups hold captured text; keep none past the retention limit.
         schema.prune_backups(self.path)
-        # Serialize projection rebuild across UI/MCP startup.
+        # Search and project links are kept current on write. Rebuild them only when the
+        # marker is missing (a migration or an import cleared it) or the projection code
+        # changed, never on every open (KAN-388).
         self.db.execute('BEGIN IMMEDIATE')
-        # Rebuildable projection; migration also indexes pre-search databases.
-        self.db.execute('DELETE FROM source_search')
-        self._rebuild_project_projections(invalidate_drafts=False)
+        built=self.db.execute("SELECT payload FROM local_metadata WHERE key='projections'").fetchone()
+        if not built or json.loads(built[0]).get('version')!=PROJECTION_VERSION:
+            self._rebuild_all_projections()
         self.db.commit()
         try:
             self.path.chmod(0o600)
@@ -443,45 +450,104 @@ class Store:
             rooms.update({room['id']:room for room in config['rooms']})
             return {'id':id,'name':row['name'],'aliases':config['aliases'],'config_revision':config['config_revision'],'configured_rooms':config['rooms'],'workstreams':sorted({r['workstream'] for r in links if r['workstream']}),'rooms':list(rooms.values()),'sources':sources,'obligations':obligations,'drafts':[d for d in self._drafts() if d['obligation_id'] in {o['id'] for o in obligations}]}
 
+    def _today(self, active, now):
+        """Anchor today's plan from active obligation payloads; may persist the plan."""
+        day=now.date().isoformat()
+        row=self.db.execute('SELECT payload FROM plans WHERE day=?',(day,)).fetchone()
+        existing=json.loads(row[0]) if row else None
+        eligible=[o for o in active if self.rules.is_mine(o) and o['status']=='open']
+        eligible_ids={o['id'] for o in eligible}
+        if existing and (existing.get('anchored') or existing['priorities']):
+            today=existing
+            today.setdefault('revision',1)
+            survivors=[oid for oid in today['priorities'] if oid in eligible_ids]
+            if survivors!=today['priorities']:
+                today.update(priorities=survivors,revision=today['revision']+1,anchored=True)
+                self.db.execute('INSERT OR REPLACE INTO plans VALUES(?,?)',(day,_json(today)))
+        else:
+            ranked=sorted(eligible,key=lambda o:(o.get('follow_up_at') or o['due_at'] or '9999',o['created_at'],o['id']))
+            today={'date':day,'priorities':[o['id'] for o in ranked[:3]],'kind':'suggested','anchored_at':now.isoformat(),'revision':(existing.get('revision',1)+1 if existing and ranked else existing.get('revision',1) if existing else 1),'anchored':bool(ranked)}
+            if today['priorities'] or not existing:
+                self.db.execute('INSERT OR REPLACE INTO plans VALUES(?,?)',(day,_json(today)))
+        today['new_urgency']=[o['id'] for o in active if o['id'] not in today['priorities'] and ((o.get('due_at') and self._calendar_date(o['due_at'])<=day) or (o.get('follow_up_at') and self._calendar_date(o['follow_up_at'])<=day))]
+        return today
+
+    def _week(self, active, now):
+        day=now.date().isoformat()
+        monday=now.date()-timedelta(days=now.weekday())
+        week_end=(monday+timedelta(days=6)).isoformat()
+        this_week=[]; undated=[]; backlog=[]; overdue=[]
+        for obligation in active:
+            dates=[self._calendar_date(obligation[field]) for field in ('due_at','follow_up_at') if obligation.get(field)]
+            if not dates:
+                undated.append(obligation)
+            elif any(date<day for date in dates):
+                overdue.append(obligation)
+            elif any(monday.isoformat()<=date<=week_end for date in dates):
+                this_week.append(obligation)
+            else:
+                backlog.append(obligation)
+        return {'start':monday.isoformat(),'end':week_end,'commitments':[o for o in this_week if o['commitment']],'suggestions':[o for o in this_week if not o['commitment']],'overdue':overdue,'overdue_count':len(overdue),'undated':undated,'backlog':backlog,'undated_count':len(undated),'backlog_count':len(backlog)}
+
+    def _refresh_needed(self):
+        row=self.db.execute("SELECT payload FROM local_metadata WHERE key='refresh_needed'").fetchone()
+        return json.loads(row[0]) if row else {'needed':False}
+
+    COVERAGE_NOTE='Only explicitly configured and observed sources are covered. Vendor semantics and upstream ACL enforcement are not guaranteed. Laptop sleep pauses capture.'
+
     def snapshot(self):
         with self._transaction():
-            now=self.now(); day=now.date().isoformat()
+            now=self.now()
             obligations=[self._obligation(o['id']) for o in self._rows('obligations')]
             active=[o for o in obligations if o['status'] not in ('resolved','dismissed')]
-            row=self.db.execute('SELECT payload FROM plans WHERE day=?',(day,)).fetchone()
-            existing=json.loads(row[0]) if row else None
-            eligible=[o for o in active if self.rules.is_mine(o) and o['status']=='open']
-            eligible_ids={o['id'] for o in eligible}
-            if existing and (existing.get('anchored') or existing['priorities']):
-                today=existing
-                today.setdefault('revision',1)
-                survivors=[oid for oid in today['priorities'] if oid in eligible_ids]
-                if survivors!=today['priorities']:
-                    today.update(priorities=survivors,revision=today['revision']+1,anchored=True)
-                    self.db.execute('INSERT OR REPLACE INTO plans VALUES(?,?)',(day,_json(today)))
-            else:
-                ranked=sorted(eligible,key=lambda o:(o.get('follow_up_at') or o['due_at'] or '9999',o['created_at'],o['id']))
-                today={'date':day,'priorities':[o['id'] for o in ranked[:3]],'kind':'suggested','anchored_at':now.isoformat(),'revision':(existing.get('revision',1)+1 if existing and ranked else existing.get('revision',1) if existing else 1),'anchored':bool(ranked)}
-                if today['priorities'] or not existing:
-                    self.db.execute('INSERT OR REPLACE INTO plans VALUES(?,?)',(day,_json(today)))
-            today['new_urgency']=[o['id'] for o in active if o['id'] not in today['priorities'] and ((o.get('due_at') and self._calendar_date(o['due_at'])<=day) or (o.get('follow_up_at') and self._calendar_date(o['follow_up_at'])<=day))]
-            monday=now.date()-timedelta(days=now.weekday())
-            week_end=(monday+timedelta(days=6)).isoformat()
-            this_week=[]; undated=[]; backlog=[]; overdue=[]
-            for obligation in active:
-                dates=[self._calendar_date(obligation[field]) for field in ('due_at','follow_up_at') if obligation.get(field)]
-                if not dates:
-                    undated.append(obligation)
-                elif any(date<day for date in dates):
-                    overdue.append(obligation)
-                elif any(monday.isoformat()<=date<=week_end for date in dates):
-                    this_week.append(obligation)
-                else:
-                    backlog.append(obligation)
-            week={'start':monday.isoformat(),'end':week_end,'commitments':[o for o in this_week if o['commitment']],'suggestions':[o for o in this_week if not o['commitment']],'overdue':overdue,'overdue_count':len(overdue),'undated':undated,'backlog':backlog,'undated_count':len(undated),'backlog_count':len(backlog)}
-            refresh_row=self.db.execute("SELECT payload FROM local_metadata WHERE key='refresh_needed'").fetchone()
-            refresh_needed=json.loads(refresh_row[0]) if refresh_row else {'needed':False}
-            return {'refresh_needed':refresh_needed,'timezone':self.timezone_name,'projects':[{**dict(p),**self._project_config(p['id'])} for p in self.db.execute('SELECT * FROM projects ORDER BY name')],'obligations':obligations,'drafts':self._drafts(),'connectors':self._rows('connectors'),'today':today,'week':week,'recent':sorted(self.list_sources(),key=lambda s:s['observed_at'],reverse=True)[:30],'review':[o for o in active if o.get('kind')!='review' and (o['status']=='candidate' or not o.get('owner') or not o.get('project_id') or o.get('review_reason'))],'review_queue':sorted([o for o in active if o.get('kind')=='review'],key=lambda o:(-o.get('age_hours',0),o['id'])),'coverage_note':'Only explicitly configured and observed sources are covered. Vendor semantics and upstream ACL enforcement are not guaranteed. Laptop sleep pauses capture.'}
+            today=self._today(active,now)
+            week=self._week(active,now)
+            recent=[self._source(row[0]) for row in self.db.execute("SELECT id FROM sources ORDER BY json_extract(payload,'$.observed_at') DESC,rowid LIMIT 30")]
+            return {'refresh_needed':self._refresh_needed(),'timezone':self.timezone_name,'projects':[{**dict(p),**self._project_config(p['id'])} for p in self.db.execute('SELECT * FROM projects ORDER BY name')],'obligations':obligations,'drafts':self._drafts(),'connectors':self._rows('connectors'),'today':today,'week':week,'recent':recent,'review':[o for o in active if o.get('kind')!='review' and (o['status']=='candidate' or not o.get('owner') or not o.get('project_id') or o.get('review_reason'))],'review_queue':sorted([o for o in active if o.get('kind')=='review'],key=lambda o:(-o.get('age_hours',0),o['id'])),'coverage_note':self.COVERAGE_NOTE}
+
+    def attention(self, cursor=0, limit=10, status=None, project_id=None, project_limit=30):
+        """What get_attention needs, from narrow queries (KAN-388).
+
+        Plans and week buckets read obligation payloads only; evidence and freshness are
+        loaded for the requested page alone, and no source body is read.
+        """
+        if not isinstance(cursor,int) or cursor<0 or not isinstance(limit,int) or not 1<=limit<=30:
+            raise ValueError('cursor must be nonnegative; limit must be 1..30')
+        with self._transaction():
+            now=self.now()
+            active=[json.loads(row[0]) for row in self.db.execute("SELECT payload FROM obligations WHERE json_extract(payload,'$.status') NOT IN ('resolved','dismissed') ORDER BY rowid")]
+            today=self._today(active,now)
+            week=self._week(active,now)
+            clauses=[]; args=[]
+            if status is not None:
+                clauses.append("json_extract(payload,'$.status')=?"); args.append(status)
+            if project_id is not None:
+                clauses.append("json_extract(payload,'$.project_id')=?"); args.append(project_id)
+            where=(' WHERE '+' AND '.join(clauses)) if clauses else ''
+            total=self.db.execute('SELECT count(*) FROM obligations'+where,args).fetchone()[0]
+            page=[self._obligation(row[0]) for row in self.db.execute('SELECT id FROM obligations'+where+' ORDER BY rowid LIMIT ? OFFSET ?',[*args,limit,cursor])]
+            projects=[dict(row) for row in self.db.execute('SELECT id,name FROM projects ORDER BY name LIMIT ?',(project_limit,))]
+            return {'obligations':page,'page':{'total':total,'next_cursor':cursor+limit if cursor+limit<total else None,'truncated':cursor+limit<total},
+                    'projects':projects,'project_total':self.db.execute('SELECT count(*) FROM projects').fetchone()[0],
+                    'refresh_needed':self._refresh_needed(),'today':today,'week':week,'connectors':self._rows('connectors'),'coverage_note':self.COVERAGE_NOTE}
+
+    def source(self, source_id):
+        """One source by id, or None; reads that row only."""
+        with self._lock:
+            return self._source(source_id)
+
+    def obligation(self, obligation_id):
+        """One obligation with its evidence and freshness; KeyError if unknown."""
+        with self._lock:
+            return self._obligation(obligation_id)
+
+    def drafts_for(self, obligation_id):
+        with self._lock:
+            return [self._current_draft(json.loads(row[0])) for row in self.db.execute("SELECT payload FROM drafts WHERE json_extract(payload,'$.obligation_id')=? ORDER BY rowid",(obligation_id,))]
+
+    def connectors(self):
+        with self._lock:
+            return self._rows('connectors')
 
     def draft(self, id):
         with self._transaction():
@@ -713,7 +779,7 @@ class Store:
                 return project
             self.db.execute('INSERT OR REPLACE INTO projects VALUES(?,?)',(id,name))
             self.db.execute('INSERT INTO project_config(project_id,aliases,rooms) VALUES(?,?,?)',(id,_json(aliases),_json(rooms)))
-            self._rebuild_project_projections()
+            self._rebuild_project_projections(id,{room['id'] for room in rooms})
             return self.project(id)
 
     def request_refresh(self, reason, source_id=None):
@@ -748,17 +814,37 @@ class Store:
             self.db.execute('INSERT OR REPLACE INTO plans VALUES(?,?)',(today['date'],_json(today)))
             return self.snapshot()['today']
 
-    def _rebuild_project_projections(self, invalidate_drafts=True):
-        """Reconcile explicit room configuration without rewriting upstream evidence."""
+    def _project_source(self, source):
+        """Derive one source's project links and search row from its recorded state."""
+        self.db.execute('DELETE FROM source_projects WHERE source_id=?',(source['id'],))
+        if not source.get('deleted'):
+            for project in source['projects']:
+                self.db.execute('INSERT OR IGNORE INTO source_projects VALUES(?,?,?)',(source['id'],project['id'],project.get('workstream','')))
+        self._index_source(source)
+
+    def _rebuild_all_projections(self):
+        """Recreate search and project links from recorded state (migration, import, repair)."""
+        self.db.execute('DELETE FROM source_search')
         self.db.execute('DELETE FROM source_projects')
         for source in self.list_sources():
-            if not source.get('deleted'):
-                for project in source['projects']:
-                    self.db.execute('INSERT OR IGNORE INTO source_projects VALUES(?,?,?)',(source['id'],project['id'],project.get('workstream','')))
-            self._index_source(source)
+            self._project_source(source)
+        self.db.execute('INSERT INTO local_metadata VALUES(?,?) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload',('projections',_json({'version':PROJECTION_VERSION})))
+
+    def rebuild_projections(self):
+        """Explicit repair: rebuild the search index and project links. Recorded state is untouched."""
+        with self._transaction():
+            self._rebuild_all_projections()
+            return {'sources':self.db.execute('SELECT count(*) FROM sources').fetchone()[0],'projection_version':PROJECTION_VERSION}
+
+    def _rebuild_project_projections(self, project_id, rooms):
+        """Re-derive only the sources a project's name, aliases or rooms can affect."""
+        affected={row[0] for row in self.db.execute('SELECT source_id FROM source_projects WHERE project_id=?',(project_id,))}
+        if rooms:
+            marks=','.join('?'*len(rooms))
+            affected|={row[0] for row in self.db.execute(f"SELECT id FROM sources WHERE json_extract(payload,'$.room_id') IN ({marks})",sorted(rooms))}
+        for sid in sorted(affected):
+            self._project_source(self._source(sid))
         # Mapping or name changes can affect context packets already reviewed.
-        if not invalidate_drafts:
-            return
         for draft in self._rows('drafts'):
             draft['stale']=True
             self.db.execute('UPDATE drafts SET payload=? WHERE id=?',(_json(draft),draft['id']))
@@ -785,5 +871,5 @@ class Store:
                 raise ValueError('Room IDs must be unique within a project')
             self.db.execute('UPDATE projects SET name=? WHERE id=?',(name,id))
             self.db.execute('INSERT OR REPLACE INTO project_config(project_id,aliases,rooms,revision) VALUES(?,?,?,?)',(id,_json(list(dict.fromkeys(aliases))),_json(rooms),revision+1))
-            self._rebuild_project_projections()
+            self._rebuild_project_projections(id,{room['id'] for room in rooms})  # sources of removed rooms are already linked
             return self.project(id)

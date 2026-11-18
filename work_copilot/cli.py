@@ -40,6 +40,7 @@ def _run():
         elif name=='doctor':
             p.add_argument('--vault',type=Path)
             p.add_argument('--config',type=Path)
+            p.add_argument('--repair',action='store_true',help='Rebuild search and project links from recorded state, then diagnose')
         elif name in {'serve','demo'}:
             p.add_argument('--connector-config',type=Path,help='Explicit configured OAuth MCP collector; never opens OAuth automatically')
             p.add_argument('--port',type=int,default=8765)
@@ -79,7 +80,7 @@ def _run():
         parser.error('Unknown IANA timezone')
     os.environ['WORK_COPILOT_TIMEZONE']=args.timezone
     data=(args.data_dir or default_data_dir(args.command=='demo')).expanduser().resolve()
-    if args.command=='doctor':
+    if args.command=='doctor' and not args.repair:
         from .doctor import diagnose_path
         print(json.dumps(diagnose_path(data,vault=args.vault,config=args.config,timezone_name=args.timezone),indent=2,default=str))
         return
@@ -148,7 +149,10 @@ def _run():
             result=drain_activity(store,data,config)
         elif args.command=='doctor':
             from .doctor import diagnose
+            repaired=store.rebuild_projections() if args.repair else None
             result=diagnose(store,data,vault=args.vault,config=args.config)
+            if repaired is not None:
+                result['repaired']=repaired
         elif args.command=='init':
             result={'data_dir':str(data),'external_sends':False}
         elif args.command=='capture':
