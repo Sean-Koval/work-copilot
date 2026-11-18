@@ -45,6 +45,10 @@ Demo state defaults to `~/.local/share/work-copilot-demo`; real state uses the s
 
 Choose an existing, approved **work-only Markdown folder**. Capture is recursive; do not select your whole personal vault. Choose your own IANA timezone; UTC is the default.
 
+The first capture writes one small file, `.work-copilot-vault.json`, in the folder's root. It names the folder, so a moved or re-synced folder keeps every note and its evidence links. Keep the file when you move the folder.
+
+To capture a copy as a second vault, delete that file in the copy first; two folders with the same id are refused. Notes captured before the file existed are renamed to it once, with the ids in Inbox note headers. If you moved the folder before upgrading, run `capture <vault> --moved-from <old folder>` once.
+
 ```sh
 ./run.sh --timezone America/New_York --data-dir /absolute/private/copilot serve --vault /absolute/work-vault
 ```

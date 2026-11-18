@@ -1025,6 +1025,189 @@ class Store:
             self._project_source(source)
         self.db.execute('INSERT INTO local_metadata VALUES(?,?) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload',('projections',_json({'version':PROJECTION_VERSION})))
 
+    def vault_root(self, vault_id):
+        """The folder this store last captured the vault ``vault_id`` from, or None."""
+        with self._lock:
+            return self._metadata('vault-root:'+vault_id,{}).get('root')
+
+    def vault_at(self, root):
+        """The vault id this store last captured at ``root``, or None."""
+        with self._lock:
+            return self._metadata('vault-at:'+str(root),{}).get('vault_id')
+
+    def _metadata(self, key, default):
+        row=self.db.execute('SELECT payload FROM local_metadata WHERE key=?',(key,)).fetchone()
+        return json.loads(row[0]) if row else default
+
+    def adopt_vault(self, vault_id, root, old_namespaces=(), expected_root=None, present=None):
+        """Record where the vault lives, and rename notes captured under its earlier namespaces (KAN-391).
+
+        ``old_namespaces`` are earlier namespaces of this same vault: path hashes from before
+        stable ids, or the id at a folder the user named with --moved-from. A different id
+        recorded at this folder (its id file was deleted and rewritten) is renamed too, but
+        only when ``present()`` (the folder's notes, by relative path) holds at least half of
+        that id's notes; otherwise the folder may hold a different vault, and it is reported.
+        ``expected_root`` is where the caller found the vault recorded; if another capture
+        changed that meanwhile, nothing is changed and ValueError asks for a new capture.
+        """
+        if not re.fullmatch(r'[0-9a-f]{32}',vault_id) or not all(re.fullmatch(r'[0-9a-f]{20}|[0-9a-f]{32}',old) for old in old_namespaces):
+            raise ValueError('Invalid vault namespace')
+        # A rename can delete duplicate rows and merge obligations, which can't be undone, so
+        # copy the database to backups/ first, whenever an earlier namespace still has rows.
+        backup=None
+        with self._lock:
+            candidates={old for old in old_namespaces if old!=vault_id}
+            previous=self._metadata('vault-at:'+root,{}).get('vault_id')
+            if previous and previous!=vault_id:
+                candidates.add(previous)
+            if any(self._namespace_in_use(old) for old in candidates):
+                backup=str(schema.backup(self.db,self.path,f'schema-v{schema.version(self.db)}-vault-id'))
+        with self._transaction():
+            if self._metadata('vault-root:'+vault_id,{}).get('root')!=expected_root:
+                raise ValueError('Another capture of this vault ran at the same time; capture again')
+            olds=list(dict.fromkeys(old for old in old_namespaces if old!=vault_id))
+            previous=self._metadata('vault-at:'+root,{}).get('vault_id')
+            unclaimed=None
+            if previous and previous!=vault_id and previous not in olds and self._metadata('vault-root:'+previous,{}).get('root')==root:
+                prefix='vault:'+previous+':'
+                paths=[row[0][len(prefix):] for row in self.db.execute("SELECT id FROM sources WHERE id>=? AND id<? AND json_extract(payload,'$.deleted')=0",(prefix,'vault:'+previous+';'))]
+                found=present() if present and paths else set()
+                if paths and sum(path in found for path in paths)*2>=len(paths):
+                    olds.append(previous)
+                elif paths:
+                    unclaimed=previous
+            migrated=0; renamed=[]; touched=[]
+            for old in olds:
+                count=self._rename_vault_namespace(old,vault_id)
+                if count is not None:
+                    touched.append(old)
+                if count:
+                    migrated+=count; renamed.append(old)
+            if migrated:
+                self._rebuild_all_projections()
+            for key,payload in (('vault-root:'+vault_id,{'root':root}),('vault-at:'+root,{'vault_id':vault_id})):
+                self.db.execute('INSERT INTO local_metadata VALUES(?,?) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload',(key,_json(payload)))
+            for old in renamed:
+                if re.fullmatch(r'[0-9a-f]{32}',old):
+                    self.db.execute('DELETE FROM local_metadata WHERE key=?',('vault-root:'+old,))
+            for old in touched:
+                # Backups taken before this rename hold the old ids: remember the alias so text
+                # that expires or is forgotten later is still cleared from them (KAN-390).
+                # Also when only forgotten notes' markers moved, for a backup left uncleared.
+                targets=self._metadata('vault-alias:'+old,{}).get('new',[])
+                targets=[targets] if isinstance(targets,str) else targets
+                self.db.execute('INSERT INTO local_metadata VALUES(?,?) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload',('vault-alias:'+old,_json({'new':list(dict.fromkeys(targets+[vault_id]))})))
+            if renamed:
+                # Inbox note headers still carry the old ids until the vault rewrites them.
+                pending=self._metadata('vault-headers:'+vault_id,{}).get('old',[])
+                self.db.execute('INSERT INTO local_metadata VALUES(?,?) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload',('vault-headers:'+vault_id,_json({'old':list(dict.fromkeys(pending+renamed))})))
+            return {'migrated':migrated,'renamed':renamed,'unclaimed':unclaimed,'backup':backup}
+
+    def _namespace_in_use(self, namespace):
+        prefix='vault:'+namespace
+        if self.db.execute('SELECT 1 FROM sources WHERE id>=? AND id<? LIMIT 1',(prefix+':',prefix+';')).fetchone():
+            return True
+        return self.db.execute("SELECT 1 FROM obligations WHERE instr(canonical,?)>0 LIMIT 1",(prefix+':',)).fetchone() is not None
+
+    def pending_header_renames(self, vault_id):
+        """Old namespaces whose ids may still be in this vault's Inbox note headers."""
+        with self._lock:
+            return self._metadata('vault-headers:'+vault_id,{}).get('old',[])
+
+    def clear_header_renames(self, vault_id, done):
+        with self._transaction():
+            left=[old for old in self._metadata('vault-headers:'+vault_id,{}).get('old',[]) if old not in done]
+            if left:
+                self.db.execute('UPDATE local_metadata SET payload=? WHERE key=?',(_json({'old':left}),'vault-headers:'+vault_id))
+            else:
+                self.db.execute('DELETE FROM local_metadata WHERE key=?',('vault-headers:'+vault_id,))
+
+    def _merge_obligation(self, loser, winner):
+        """Move ``loser``'s links, draft and plan entries to ``winner``, then delete ``loser``."""
+        for link in ('source_intents','manual_evidence','evidence'):
+            self.db.execute(f'UPDATE OR IGNORE {link} SET obligation_id=? WHERE obligation_id=?',(winner,loser))
+            self.db.execute(f'DELETE FROM {link} WHERE obligation_id=?',(loser,))
+        row=self.db.execute('SELECT payload FROM drafts WHERE id=?',('draft-'+loser,)).fetchone()
+        if row:
+            self.db.execute('DELETE FROM drafts WHERE id=?',('draft-'+loser,))
+            if not self.db.execute('SELECT 1 FROM drafts WHERE id=?',('draft-'+winner,)).fetchone():
+                draft=json.loads(row[0]); draft.update(id='draft-'+winner,obligation_id=winner,stale=True)
+                self.db.execute('INSERT INTO drafts VALUES(?,?)',(draft['id'],_json(draft)))
+        for day,payload in self.db.execute('SELECT day,payload FROM plans').fetchall():
+            plan=json.loads(payload)
+            if loser in plan.get('priorities',[]):
+                plan['priorities']=list(dict.fromkeys(winner if oid==loser else oid for oid in plan['priorities']))
+                self.db.execute('UPDATE plans SET payload=? WHERE day=?',(_json(plan),day))
+        self.db.execute('DELETE FROM obligations WHERE id=?',(loser,))
+
+    # Values under these keys are text from notes and messages, never ids, so they are left as written.
+    _FREE_TEXT_KEYS=frozenset({'body','title','text','note','summary','excerpt','content','correction','review_reason'})
+
+    def _rename_vault_namespace(self, old, new):
+        """Rewrite ids ``vault:<old>[:...]`` (also behind a ``map:``-style prefix) to ``vault:<new>``.
+
+        Only whole id values change: columns, JSON values and JSON keys outside free text.
+        A renamed row whose key already exists under the new name is dropped, keeping the
+        newer row; a dropped obligation's links move to the one kept. Returns the number of
+        notes renamed, or None when nothing names the old namespace.
+        """
+        low,high='vault:'+old+':','vault:'+old+';'
+        count=self.db.execute('SELECT count(*) FROM sources WHERE id>=? AND id<?',(low,high)).fetchone()[0]
+        if not count and not self.db.execute('SELECT 1 FROM connectors WHERE name=?',('vault:'+old,)).fetchone():
+            return None
+        pattern=re.compile(r'^((?:[a-z][a-z0-9-]*:)?)vault:'+old+r'(?=:|$)')
+        def rename_text(value):
+            return pattern.sub(lambda m:m.group(1)+'vault:'+new,value,count=1)
+        def rename(value):
+            if isinstance(value,str):
+                return rename_text(value)
+            if isinstance(value,list):
+                return [rename(item) for item in value]
+            if isinstance(value,dict):
+                return {rename_text(key):(item if key in self._FREE_TEXT_KEYS else rename(item)) for key,item in value.items()}
+            return value
+        def column(value):
+            if not isinstance(value,str) or 'vault:'+old not in value:
+                return value
+            if value[:1] in '[{':
+                try:
+                    parsed=json.loads(value)
+                except ValueError:
+                    return value
+                changed=rename(parsed)
+                return _json(changed) if changed!=parsed else value
+            return rename_text(value)
+        for table in schema.STATE_TABLES:
+            info=list(self.db.execute(f'PRAGMA table_info({table})'))
+            names=[row[1] for row in info]
+            keys=[row[1] for row in sorted(info,key=lambda row:row[5]) if row[5]]
+            where=' OR '.join(f'instr({name},?)>0' for name in names)
+            for row in self.db.execute(f'SELECT rowid,* FROM {table} WHERE {where}',['vault:'+old]*len(names)).fetchall():
+                rowid,values=row[0],list(row[1:])
+                updated=[column(value) for value in values]
+                if updated==values:
+                    continue
+                old_key=[values[names.index(k)] for k in keys]; new_key=[updated[names.index(k)] for k in keys]
+                if keys and new_key!=old_key and self.db.execute(f'SELECT 1 FROM {table} WHERE '+' AND '.join(f'{k}=?' for k in keys),new_key).fetchone():
+                    self.db.execute(f'DELETE FROM {table} WHERE rowid=?',(rowid,))
+                    continue
+                try:
+                    self.db.execute(f'UPDATE {table} SET '+','.join(f'{name}=?' for name in names)+' WHERE rowid=?',[*updated,rowid])
+                except sqlite3.IntegrityError:
+                    if table!='obligations':
+                        raise
+                    # Same project and intent tracked under both names: keep the reviewed one,
+                    # else the more revised one, else the newer one; move the other's links to it.
+                    other,payload=self.db.execute('SELECT id,payload FROM obligations WHERE canonical=?',(updated[names.index('canonical')],)).fetchone()
+                    mine=values[names.index('id')]
+                    rank=lambda ob:(bool(ob.get('reviewed')),ob.get('revision',1))
+                    if rank(json.loads(updated[names.index('payload')]))>rank(json.loads(payload)):
+                        self._merge_obligation(other,mine)
+                        self.db.execute(f'UPDATE {table} SET '+','.join(f'{name}=?' for name in names)+' WHERE rowid=?',[*updated,rowid])
+                    else:
+                        self._merge_obligation(mine,other)
+        return count
+
     def set_retention(self, connector, days):
         """Record how long ``connector``'s text is kept, so retention also runs on open (KAN-390)."""
         if type(days) is not int or days<1:
@@ -1125,6 +1308,30 @@ class Store:
             retained={row[0]:json.loads(row[1]) for row in self.db.execute("SELECT id,json_extract(payload,'$.retained') FROM sources WHERE json_extract(payload,'$.retained') IS NOT NULL")}
             redacted={(row[0],row[1]):row[2] for row in self.db.execute("SELECT id,revision,payload FROM source_revisions WHERE json_extract(payload,'$.redacted') IS NOT NULL")}
             forgotten={row[0][len('forgotten:'):] for row in self.db.execute("SELECT key FROM local_metadata WHERE key LIKE 'forgotten:%'")}
+            older={}
+            for key,payload in self.db.execute("SELECT key,payload FROM local_metadata WHERE key LIKE 'vault-alias:%'"):
+                targets=json.loads(payload)['new']
+                for new in ([targets] if isinstance(targets,str) else targets):
+                    older.setdefault(new,set()).add(key[len('vault-alias:'):])
+        if older:
+            # A backup taken before a vault-id rename (KAN-391) still names the old ids, and a
+            # backup taken before an earlier rename names the ids before that: follow the chain.
+            def ancestors(namespace):
+                seen=set(); todo=[namespace]
+                while todo:
+                    for old in older.get(todo.pop(),()):
+                        if old not in seen and old!=namespace:
+                            seen.add(old); todo.append(old)
+                return seen
+            chains={new:ancestors(new) for new in older}
+            def also(source_id):
+                if source_id.startswith('vault:'):
+                    namespace,_,rest=source_id[len('vault:'):].partition(':')
+                    if rest:
+                        yield from ('vault:'+old+':'+rest for old in chains.get(namespace,()))
+            retained={**retained,**{alias:value for sid,value in retained.items() for alias in also(sid)}}
+            redacted={**redacted,**{(alias,rev):_json({**json.loads(value),'id':alias}) for (sid,rev),value in redacted.items() for alias in also(sid)}}
+            forgotten=forgotten|{alias for sid in forgotten for alias in also(sid)}
         report={'backups_cleared':0,'backups_removed':0,'backups_left':0}
         if not (retained or redacted or forgotten):
             return report

@@ -1,14 +1,19 @@
-"""Explicit, read-only Markdown intake and separately owned wiki projections.
+"""Explicit Markdown intake and separately owned wiki projections.
+
+Capture never rewrites a hand-written note. It writes one id file at the vault root
+(KAN-391) and, when renaming old ids, the id lines in headers of its own Inbox notes.
 
 The small metadata grammar is deliberately not a semantic/AI note extractor.
 """
 from __future__ import annotations
 
+import errno
 import hashlib
 import html
 import json
 import os
 import re
+import sys
 import threading
 from filelock import FileLock
 from pathlib import Path
@@ -19,6 +24,9 @@ from .ids import ASK_KIND, parse_intent_key, validate_source_id
 
 GENERATED_DIR = 'Work Copilot Generated'
 _MARKER = '.work-copilot-generated.json'
+# Names the vault, so its note ids survive moving or re-syncing the folder (KAN-391).
+VAULT_ID_FILE = '.work-copilot-vault.json'
+_VAULT_ID = re.compile(r'[0-9a-f]{32}')
 _MAX_NOTE = 2_000_000
 _LOCKS = {}
 _LOCKS_GUARD = threading.Lock()
@@ -69,12 +77,6 @@ def _read(root: Path, relative: Path) -> bytes:
     if len(data) > _MAX_NOTE:
         raise ValueError('Note exceeds 2 MB intake limit')
     return data
-
-
-def _vault_namespace(root: Path) -> str:
-    """The vault's id in source ids (``vault:<namespace>:<path>``): the one place it is made, so a scan and a
-    captured note's record header always agree (KAN-391 replaces the path hash with a stable id)."""
-    return hashlib.sha256(str(root).encode()).hexdigest()[:20]
 
 
 def _metadata(text: str) -> dict:
@@ -131,6 +133,242 @@ def _metadata(text: str) -> dict:
     return result
 
 
+def _legacy_namespace(root: Path) -> str:
+    """Before KAN-391, note ids were namespaced by a hash of the vault's absolute path."""
+    return hashlib.sha256(str(root).encode()).hexdigest()[:20]
+
+
+def _read_vault_id(root: Path):
+    path = root / VAULT_ID_FILE
+    if path.is_symlink():
+        raise ValueError(f'{VAULT_ID_FILE} in the vault cannot be a symlink')
+    if not path.exists():
+        return None
+    try:
+        value = json.loads(_read(root, Path(VAULT_ID_FILE)).decode('utf-8')).get('vault_id')
+    except (ValueError, AttributeError, UnicodeError) as exc:
+        raise ValueError(f'{VAULT_ID_FILE} in the vault is damaged') from exc
+    if not isinstance(value, str) or not _VAULT_ID.fullmatch(value):
+        raise ValueError(f'{VAULT_ID_FILE} in the vault holds no valid vault id')
+    return value
+
+
+class _ReadOnlyVault(OSError):
+    """The id file's temporary copy could not be created: the folder is not writable."""
+
+
+def _fsync_folder(folder: Path):
+    if os.name != 'posix':
+        return
+    try:
+        fd = os.open(folder, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def _durable(handle):
+    handle.flush()
+    os.fsync(handle.fileno())
+    if sys.platform == 'darwin':  # fsync alone does not reach the disk on macOS
+        import fcntl
+        try:
+            fcntl.fcntl(handle.fileno(), fcntl.F_FULLFSYNC)
+        except OSError:
+            pass
+
+
+def _write_vault_id(root: Path) -> str:
+    """Create the id file whole or not at all: write a temporary file, then link it into place.
+
+    Linking fails if another process created the file first (FileExistsError), so two first
+    captures can never leave a half-written or second id. Where the filesystem has no hard
+    links (FAT, exFAT, some network and cloud mounts), the file is created exclusively instead;
+    the vault lock already keeps two captures in one store from racing.
+    """
+    import uuid
+    value = uuid.uuid4().hex
+    content = (json.dumps({'vault_id': value, 'note': 'Work Copilot names this folder by this id. Keep it when moving or syncing the folder.'}, indent=2) + '\n').encode('utf-8')
+    target = root / VAULT_ID_FILE
+    temporary = root / f'.{VAULT_ID_FILE}.{uuid.uuid4().hex}.tmp'
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_BINARY', 0)
+    try:
+        fd = os.open(temporary, flags, 0o644)
+    except OSError as exc:
+        raise _ReadOnlyVault(exc.errno, exc.strerror) from exc
+    try:
+        with os.fdopen(fd, 'wb') as handle:
+            handle.write(content)
+            _durable(handle)
+        try:
+            if os.name == 'posix':
+                os.link(temporary, target)
+            else:
+                os.rename(temporary, target)  # Windows: fails if the file exists
+        except FileExistsError:
+            raise
+        except OSError:
+            with os.fdopen(os.open(target, flags, 0o644), 'wb') as handle:
+                handle.write(content)
+                _durable(handle)
+        _fsync_folder(root)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+    return value
+
+
+# A folder Work Copilot may not write to: keep capturing it under the old path-hash namespace.
+_READ_ONLY = {errno.EACCES, errno.EPERM, errno.EROFS}
+
+
+def _vault_identity(root: Path):
+    """(namespace, vault_id, note) for a resolved vault root, writing the id file on first use."""
+    vault_id = _read_vault_id(root)
+    if vault_id is None:
+        try:
+            vault_id = _write_vault_id(root)
+        except FileExistsError:
+            vault_id = _read_vault_id(root)
+        except _ReadOnlyVault as exc:
+            if exc.errno not in _READ_ONLY:
+                raise
+            return _legacy_namespace(root), None, f'Could not write {VAULT_ID_FILE} in the vault ({exc.strerror or exc}); note ids still depend on the folder path.'
+    return vault_id, vault_id, None
+
+
+def _vault_namespace(root: Path) -> str:
+    """The vault's id in source ids (``vault:<namespace>:<path>``): the one place it is made,
+    so a scan and a captured note's record header always agree. ``root`` must be resolved.
+    Writes the id file when the vault has none yet."""
+    return _vault_identity(root)[0]
+
+
+def _old_root(path) -> Path:
+    """Where a vault was before it moved, as the path-hash namespace saw it (it may be gone now)."""
+    return Path(os.path.abspath(Path(path).expanduser())).resolve()
+
+
+def _namespace(store, root: Path, moved_from=None) -> dict:
+    """The vault's stable id, with notes from its earlier namespaces renamed to it once.
+
+    A vault the store already knows at another folder that still exists with the same id is
+    a copy, and is refused rather than letting two folders overwrite each other's notes.
+    """
+    try:
+        namespace, vault_id, note = _vault_identity(root)
+    except ValueError as exc:
+        known = store.vault_at(str(root)) if hasattr(store, 'vault_at') else None
+        hint = f' Its recorded id is {known}: restore the file from a backup or sync copy, or write {{"vault_id": "{known}"}} into it.' if known else ' Restore it from a backup or sync copy.'
+        raise ValueError(str(exc) + '.' + hint) from exc
+    result = {'namespace': namespace, 'vault_id': vault_id, 'migrated': 0, 'note': note}
+    if vault_id is None or not hasattr(store, 'adopt_vault'):
+        return result
+    known = store.vault_root(vault_id)
+    if known and known != str(root):
+        other = Path(known)
+        try:
+            same = os.path.samefile(other, root)
+        except OSError:
+            same = False
+        if not same:
+            try:
+                copied = other.is_dir() and not other.is_symlink() and _read_vault_id(other.resolve()) == vault_id
+            except (OSError, ValueError):
+                copied = False
+            if copied:
+                raise ValueError(f'This folder and {known} have the same {VAULT_ID_FILE}, so one is a copy of the other. '
+                                 f'Work Copilot keeps capturing {known}. To capture this folder as a separate vault, '
+                                 f'delete {VAULT_ID_FILE} in it and capture again.')
+    olds = [_legacy_namespace(root)]
+    if moved_from:
+        old_root = _old_root(moved_from)
+        olds.append(_legacy_namespace(old_root))
+        earlier = store.vault_at(str(old_root))
+        if earlier and earlier != vault_id:
+            olds.append(earlier)
+    adopted = store.adopt_vault(vault_id, str(root), olds, expected_root=known, present=lambda: _note_paths(root))
+    result['migrated'] = adopted['migrated']
+    result['backup'] = adopted.get('backup')
+    if adopted.get('unclaimed'):
+        result['note'] = (f'This folder had a different vault id ({adopted["unclaimed"]}) whose notes are mostly not here, '
+                          'so they were left under that id. If this is the same vault, capture it with --moved-from <this folder>.')
+    pending = store.pending_header_renames(vault_id)
+    if pending:
+        try:
+            result['rewritten_headers'] = _rewrite_note_headers(root, pending, vault_id)
+            store.clear_header_renames(vault_id, pending)
+        except OSError as exc:
+            result['note'] = f'Could not update the ids in Inbox note headers ({exc.strerror or exc}); the next capture tries again.'
+    return result
+
+
+def _note_paths(root: Path) -> set:
+    """Relative paths of the vault's Markdown notes, as note ids spell them."""
+    return {path.relative_to(root).as_posix() for path in root.rglob('*.md') if GENERATED_DIR not in path.relative_to(root).parts}
+
+
+def _record_id(source_id: str) -> str:
+    """The record id a captured note's header carries (KAN-394)."""
+    from .knowledge import record_id
+    return record_id(source_id, 'vault')
+
+
+_FRONTMATTER = re.compile(r'\A\ufeff?---\r?\n(?:.*?\r?\n)?---\r?\n', re.S)
+
+
+def _rewrite_note_headers(root: Path, old_namespaces, namespace: str) -> int:
+    """Rename source and record ids in the headers of notes capture_note wrote to Inbox/.
+
+    Only notes whose header ``id:`` is the record id of their own old source id are
+    changed, so a hand-written note that quotes an old id stays as written. Only the
+    frontmatter changes; the note body keeps its bytes.
+    """
+    inbox = root / 'Inbox'
+    if inbox.is_symlink() or not inbox.is_dir():
+        return 0
+    rewritten = 0
+    for path in sorted(inbox.glob('*.md')):
+        if path.is_symlink() or not path.is_file():
+            continue
+        try:
+            text = _read(root, path.relative_to(root)).decode('utf-8')
+        except (OSError, ValueError, UnicodeError):
+            continue
+        match = _FRONTMATTER.match(text)
+        if not match:
+            continue
+        head = new_head = match.group(0)
+        for old in old_namespaces:
+            source_id = f'vault:{old}:Inbox/{path.name}'
+            if not re.search(rf'^id:[ \t]*["\']?{_record_id(source_id)}["\']?[ \t]*\r?$', head, re.M):
+                continue
+            renamed = f'vault:{namespace}:Inbox/{path.name}'
+            new_head = new_head.replace(source_id, renamed).replace(_record_id(source_id), _record_id(renamed))
+        if new_head == head:
+            continue
+        temporary = path.with_name(f'.{path.name}.{os.getpid()}.tmp')
+        try:
+            with temporary.open('xb') as handle:
+                handle.write((new_head + text[len(head):]).encode('utf-8'))
+                _durable(handle)
+            os.replace(temporary, path)
+        finally:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+        rewritten += 1
+    return rewritten
+
+
 _PASTED = '\n## Pasted frontmatter\n\n```yaml\n'
 
 
@@ -153,14 +391,17 @@ def _sources(store):
     return store.snapshot().get('sources', [])
 
 
-def capture_vault(store, root) -> dict:
+def capture_vault(store, root, moved_from=None) -> dict:
+    """Capture the vault. ``moved_from`` names the folder it was in before it moved, when
+    that move happened before the vault had an id file (its notes are then renamed)."""
     with _vault_lock(root):
-        return _capture_vault_unlocked(store, root)
+        return _capture_vault_unlocked(store, root, moved_from)
 
 
-def _capture_vault_unlocked(store, root) -> dict:
+def _capture_vault_unlocked(store, root, moved_from=None) -> dict:
     root = _root(root)
-    namespace = _vault_namespace(root)
+    vault = _namespace(store, root, moved_from)
+    namespace = vault['namespace']
     prefix = f'vault:{namespace}:'
     connector = f'vault:{namespace}'
     prior = {s['id']: s for s in _sources(store) if s['id'].startswith(prefix)}
@@ -210,7 +451,8 @@ def _capture_vault_unlocked(store, root) -> dict:
                 # (KAN-392 turned a bare kind into <sid>:<kind>), an unchanged note gets a new revision.
                 extraction_hash = hashlib.sha256(json.dumps([[(p['id'],p.get('name')) for p in suggestions], obligations], sort_keys=True).encode()).hexdigest()
                 previous = prior.get(sid, {})
-                if previous.get('content_hash') == content_hash and previous.get('extraction_hash') == extraction_hash and not previous.get('deleted'):
+                # A moved vault keeps its ids but changes its file URLs: that needs a new revision.
+                if previous.get('content_hash') == content_hash and previous.get('extraction_hash') == extraction_hash and previous.get('url') == path.as_uri() and not previous.get('deleted'):
                     revision = previous['revision']
                 else:
                     revision = hashlib.sha256((str(previous.get('revision', '')) + content_hash + extraction_hash).encode()).hexdigest()
@@ -230,7 +472,16 @@ def _capture_vault_unlocked(store, root) -> dict:
     result = store.ingest(items, connector=connector, checkpoint={'scanned_at': datetime.now(timezone.utc).isoformat(), 'root': str(root)})
     if errors:
         store.set_connector(connector, 'error', error='Some notes unavailable; deletion reconciliation withheld')
-    return {'captured': len(items), 'errors': errors, 'root': str(root), 'result': result}
+    report = {'captured': len(items), 'errors': errors, 'root': str(root), 'vault_id': vault['vault_id'], 'namespace': namespace, 'result': result}
+    if vault.get('migrated'):
+        report['migrated_note_ids'] = vault['migrated']
+    if vault.get('backup'):
+        report['backup_before_rename'] = vault['backup']
+    if vault.get('rewritten_headers'):
+        report['rewritten_note_headers'] = vault['rewritten_headers']
+    if vault.get('note'):
+        report['note'] = vault['note']
+    return report
 
 
 def _plain(value) -> str:

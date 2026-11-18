@@ -49,6 +49,7 @@ def _run():
             _review_options(p)
         elif name=='capture':
             p.add_argument('vault',type=Path)
+            p.add_argument('--moved-from',type=Path,help='The folder this vault was in before it moved, if it moved before it had a .work-copilot-vault.json (renames its notes once)')
         elif name=='export':
             p.add_argument('vault',type=Path,nargs='?',help='Regenerate the project wiki in this vault (omit with --to or --jsonl)')
             p.add_argument('--jsonl',type=Path,help='Write all local state to this JSONL file (a portable backup; restore with import --jsonl)')
@@ -159,7 +160,7 @@ def _run():
             result={'data_dir':str(data),'external_sends':False}
         elif args.command=='capture':
             from .vault import capture_vault, export_projects
-            result=capture_vault(store,args.vault)
+            result=capture_vault(store,args.vault,moved_from=args.moved_from)
             result['export']=export_projects(store,args.vault)
         elif args.command=='export' and args.jsonl:
             result=store.export_jsonl(args.jsonl)

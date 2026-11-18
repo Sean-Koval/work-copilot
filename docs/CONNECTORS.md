@@ -2,7 +2,7 @@
 
 ## What works without a work account
 
-- A selected local Markdown/Obsidian vault is real, read-only file capture. Background scans run only while the service is running. Originals are never rewritten.
+- A selected local Markdown/Obsidian vault is real file capture. Background scans run only while the service is running. Hand-written notes are never rewritten. Capture adds one id file, `.work-copilot-vault.json`, and may update the id lines in headers of notes `capture_note` wrote to `Inbox/`.
 - Paste a transcript or note into the dashboard's inbox. This explicitly creates a new private `Inbox/<date>-<random-id>.md` in your selected vault, then captures it. Full context, decisions, risks and awareness remain source passages, even with no extracted action.
 - Normalized JSON import ingests evidence through the same SQLite ledger as fixtures and notes.
 - The fictional demo simulates multiple Symphony rooms, Jira, GitHub, Confluence and meeting evidence. It is not a verified integration with any of those products.
