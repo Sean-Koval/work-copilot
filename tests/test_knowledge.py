@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 import sys
+import tomllib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -12,7 +13,9 @@ from jsonschema import Draft202012Validator
 
 from work_copilot.knowledge import (
     ENVELOPE_VERSION,
+    OBLIGATION_STATUSES,
     RECORD_FORMAT_VERSION,
+    SCOPES,
     export_sources,
     parse_frontmatter,
     validate_envelope,
@@ -21,9 +24,13 @@ from work_copilot.store import Store
 from work_copilot.vault import capture_vault
 
 CONTRACT = Path(__file__).parent / 'contracts' / 'knowledge-record.schema.json'
-# ai-dlc contracts/knowledge-record.schema.json at main c10ba3b3 (adds boundary `project`, KAN-457/475).
+# ai-dlc contracts/knowledge-record.schema.json at commit c217bd0 (main, 2026-11-17; adds retracts and quote fields).
 # Refresh the copy and this hash together when the contract changes.
 CONTRACT_SHA256 = 'eda789937b670f3bc527ebffc366464af650bf3464defab33e084b0409444f59'
+# ai-dlc contracts/knowledge-record.versions.toml, copied with the schema (KAN-504): it
+# publishes the canonical SHA-256 of the schema for each FORMAT_VERSION.
+VERSIONS = CONTRACT.with_name('knowledge-record.versions.toml')
+VERSIONS_SHA256 = '623ae4a81f9208e335440783872e529ac8a3bcc465017cefe4a1868baac367df'
 FIXTURES = Path(__file__).parent / 'fixtures' / 'knowledge_export'
 NOW = datetime(2026, 11, 12, 18, 0, tzinfo=timezone.utc)
 SOURCES = [
@@ -31,7 +38,7 @@ SOURCES = [
      'body': 'Agreed: ticket titles start with the repository name and a colon.\nThanks all.',
      'url': 'https://chat.example.invalid/rooms/team/threads/42', 'observed_at': '2026-11-06T10:12:00+00:00',
      'projects': [{'id': 'atlas', 'name': 'Atlas'}],
-     'obligations': [{'intent_key': 'rename-tickets', 'title': 'Rename open tickets', 'project_id': 'atlas', 'owner': None, 'status': 'candidate'}]},
+     'obligations': [{'intent_key': 'symphony:tenant:thread:42:rename-tickets', 'title': 'Rename open tickets', 'project_id': 'atlas', 'owner': None, 'status': 'candidate'}]},
     {'id': 'zoom:tenant:meeting:7', 'revision': '1', 'provider': 'zoom', 'title': 'Weekly planning call',
      'body': "Speaker 1: Let's keep releases on Thursdays.\nSpeaker 2: I'll share the release notes by Friday.\n",
      'observed_at': '2026-11-10T15:00:00-05:00', 'url': 'file:///private/path/transcript.vtt'},
@@ -86,6 +93,45 @@ def test_vendored_contract_is_the_pinned_copy():
     for field in ('schema_version', 'revision', 'provider', 'title', 'observed_at', 'obligations', 'url'):
         assert field in published['properties']
     assert published['properties']['schema_version']['anyOf'][0]['const'] == ENVELOPE_VERSION
+
+
+def canonical_sha256(value):
+    """The hash ai-dlc publishes: canonical JSON, sorted keys, no spaces, UTF-8."""
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode('utf-8')).hexdigest()
+
+
+def test_vendored_contract_matches_a_published_format_version():
+    published = schema()
+    versions = tomllib.loads(VERSIONS.read_text(encoding='utf-8'))['versions']
+    key = str(published['x-format-version'])
+    assert key in versions, f'format version {key} is not published in {VERSIONS.name}; refresh it with the schema'
+    claimed = versions[key]
+    digest = canonical_sha256(published)
+    assert digest not in claimed.get('superseded', []), 'vendored schema is a stale copy of its format version'
+    assert digest == claimed['sha256']
+    assert hashlib.sha256(VERSIONS.read_bytes()).hexdigest() == VERSIONS_SHA256
+
+
+def enum_of(prop):
+    """A property's enum, also when it is nullable (``anyOf`` with ``null``)."""
+    found = [prop['enum']] if 'enum' in prop else [p['enum'] for p in prop.get('anyOf', []) if 'enum' in p]
+    assert len(found) == 1, prop
+    return tuple(found[0])
+
+
+def test_scopes_and_statuses_come_from_the_contract():
+    import subprocess
+    from typing import get_args
+
+    from work_copilot.mcp_server import ObligationStatus
+
+    published = schema()
+    assert enum_of(published['properties']['scope']) == SCOPES
+    assert enum_of(published['$defs']['Obligation']['properties']['status']) == OBLIGATION_STATUSES
+    assert get_args(ObligationStatus) == OBLIGATION_STATUSES
+    # The CLI keeps its own literal so a hook run never imports pydantic; its help shows the choices.
+    shown = subprocess.run([sys.executable, '-m', 'work_copilot', 'export', '--help'], capture_output=True, text=True, check=True).stdout
+    assert '{' + ','.join(SCOPES) + '}' in shown
 
 
 def test_exported_records_match_the_contract_and_fixtures(store, repo):
@@ -153,7 +199,7 @@ def test_dedupe_hashes_the_envelope_without_revision(store, repo):
     store.ingest([dict(SOURCES[0], revision='5')])
     assert export_sources(store, repo, owner='sean', now=NOW)['written'] == []
     # A changed obligation needs a new revision, and gives a new record.
-    changed = [{'intent_key': 'rename-tickets', 'title': 'Rename open tickets', 'status': 'open'}]
+    changed = [{'intent_key': 'symphony:tenant:thread:42:rename-tickets', 'title': 'Rename open tickets', 'status': 'open'}]
     with pytest.raises(ValueError, match='revision'):
         store.ingest([dict(SOURCES[0], revision='5', obligations=changed)])
     store.ingest([dict(SOURCES[0], revision='6', obligations=changed)])

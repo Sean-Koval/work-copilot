@@ -2,10 +2,23 @@ from datetime import datetime, timezone
 import pytest
 from work_copilot.store import Store, ConflictError
 from work_copilot.demo import seed_demo
+from work_copilot.ids import ask_kind
+
+
+def sid(obj):
+    return 'symphony:demo:'+obj
+
+
+SID=sid('sym/demo/1')
+KEY=SID+':deployment-status'
+
+
+def by_kind(store, kind):
+    return next(o for o in store.snapshot()['obligations'] if ask_kind(o['intent_key'])==kind)
 
 
 def source(**kw):
-    return dict(id='sym/demo/1', revision='1', provider='symphony', title='Release question', body='Is Atlas deployed?', room_id='room1', room_name='Delivery', projects=[{'id':'atlas','name':'Atlas','workstream':'Engineering'},{'id':'beacon','name':'Beacon','workstream':'Commercial'}], obligations=[{'intent_key':'deployment-status','title':'Confirm deployment status','project_id':'atlas','owner':None}], **kw)
+    return dict(id=SID, revision='1', provider='symphony', title='Release question', body='Is Atlas deployed?', room_id='room1', room_name='Delivery', projects=[{'id':'atlas','name':'Atlas','workstream':'Engineering'},{'id':'beacon','name':'Beacon','workstream':'Commercial'}], obligations=[{'intent_key':KEY,'title':'Confirm deployment status','project_id':'atlas','owner':None}], **kw)
 
 
 def test_restart_dedupe_mapping_and_uncertain_ownership(tmp_path):
@@ -33,18 +46,18 @@ def test_review_revision_and_draft_staleness(tmp_path):
 
 def test_deleted_evidence_does_not_resolve_and_plan_anchored(tmp_path):
     store=Store(tmp_path/'s.db'); store.ingest([source()]); first=store.snapshot()['today']
-    item=source(); item['id']='sym/demo/2'; item['obligations'][0]['intent_key']='new-question'; item['obligations'][0]['due_at']='2020-01-01'
+    item=source(); item['id']=sid('sym/demo/2'); item['obligations'][0]['intent_key']=sid('sym/demo/2')+':new-question'; item['obligations'][0]['due_at']='2020-01-01'
     store.ingest([item]); assert store.snapshot()['today']['priorities']==first['priorities']
     assert store.snapshot()['today']['new_urgency']
     deleted=source(); deleted.update(revision='2',deleted=True)
-    store.ingest([deleted]); ob=next(x for x in store.snapshot()['obligations'] if x['intent_key']=='deployment-status')
+    store.ingest([deleted]); ob=by_kind(store,'deployment-status')
     assert ob['freshness']=='missing'; assert ob['status']!='resolved'
 
 
 def test_canonical_intent_and_rollback(tmp_path):
-    store=Store(tmp_path/'s.db'); a=source(); b=source(); b['id']='meeting/demo/2'; store.ingest([a,b]); assert len(store.snapshot()['obligations'])==1
+    store=Store(tmp_path/'s.db'); a=source(); b=source(); b['id']=sid('meeting/demo/2'); store.ingest([a,b]); assert len(store.snapshot()['obligations'])==1
     assert len(store.snapshot()['obligations'][0]['evidence'])==2
-    with pytest.raises(ValueError): store.ingest([dict(a,id='third'),{'id':'bad'}],checkpoint='bad')
+    with pytest.raises(ValueError): store.ingest([dict(a,id=sid('third')),{'id':'bad'}],checkpoint='bad')
     assert len(store.snapshot()['recent'])==2
     assert store.snapshot()['connectors'][0]['checkpoint'] is None
 
@@ -73,12 +86,12 @@ def test_full_sources_and_historical_replay(tmp_path):
 def test_mapping_review_updates_canonical_key(tmp_path):
     store=Store(tmp_path/'s.db'); a=source(); a['obligations'][0]['project_id']=None; store.ingest([a])
     ob=store.snapshot()['obligations'][0]; store.review(ob['id'],1,{'project_id':'atlas'})
-    b=source(); b['id']='new-source'; store.ingest([b]); assert len(store.snapshot()['obligations'])==1
+    b=source(); b['id']=sid('new-source'); store.ingest([b]); assert len(store.snapshot()['obligations'])==1
 
 
 def test_missing_transcript_draft_does_not_claim_access(tmp_path):
     store=Store(tmp_path/'s.db'); seed_demo(store)
-    ob=next(o for o in store.snapshot()['obligations'] if o['intent_key']=='request-missing-transcript')
+    ob=by_kind(store,'request-missing-transcript')
     draft=store.draft(ob['id'])
     assert 'Could you share' in draft['text']
     assert ob['status']=='waiting'
@@ -116,8 +129,8 @@ def test_source_mapping_preserves_revision_and_requires_latest_token(tmp_path):
 
 
 def test_obligation_mapping_projects_untagged_evidence(tmp_path):
-    store=Store(tmp_path/'s.db'); a=source(); store.ingest([a]); b=source(); b.update(id='untagged',projects=[]); b['obligations'][0]['project_id']=None; b['obligations'][0]['intent_key']='unknown'; store.ingest([b]); ob=next(o for o in store.snapshot()['obligations'] if o['intent_key']=='unknown')
-    store.review(ob['id'],1,{'project_id':'atlas'}); assert 'untagged' in [s['id'] for s in store.project('atlas')['sources']]
+    store=Store(tmp_path/'s.db'); a=source(); store.ingest([a]); b=source(); b.update(id=sid('untagged'),projects=[]); b['obligations'][0]['project_id']=None; b['obligations'][0]['intent_key']=sid('untagged')+':unknown'; store.ingest([b]); ob=by_kind(store,'unknown')
+    store.review(ob['id'],1,{'project_id':'atlas'}); assert sid('untagged') in [s['id'] for s in store.project('atlas')['sources']]
 
 
 def test_draft_ages_without_new_ingestion(tmp_path):
@@ -130,8 +143,8 @@ def test_draft_ages_without_new_ingestion(tmp_path):
 
 def test_mapping_new_evidence_invalidates_existing_project_draft(tmp_path):
     store=Store(tmp_path/'s.db'); store.ingest([source()]); ob=store.snapshot()['obligations'][0]; d=store.draft(ob['id'])
-    b=source(); b.update(id='unmapped',projects=[],obligations=[]); store.ingest([b]); assert not store.snapshot()['drafts'][0]['stale']
-    store.map_source('unmapped','1',[{'id':'atlas','name':'Atlas'}]); assert store.snapshot()['drafts'][0]['stale']
+    b=source(); b.update(id=sid('unmapped'),projects=[],obligations=[]); store.ingest([b]); assert not store.snapshot()['drafts'][0]['stale']
+    store.map_source(sid('unmapped'),'1',[{'id':'atlas','name':'Atlas'}]); assert store.snapshot()['drafts'][0]['stale']
 
 
 def test_fts_search_filters_updates_deletes_and_aliases(tmp_path):
@@ -152,11 +165,11 @@ def test_fts_query_operators_are_text_not_sql(tmp_path):
 
 def test_track_waiting_followup_is_not_deadline_and_dedupes(tmp_path):
     store=Store(tmp_path/'s.db',now=lambda:datetime(2026,10,26,tzinfo=timezone.utc)); store.ingest([source()])
-    payload={'intent_key':'atlas-transcript-alex','title':'Ask Alex for the Atlas transcript','project_id':'atlas','waiting_on':'person:alex','follow_up_at':'2026-10-27','evidence_ids':['sym/demo/1']}
+    payload={'intent_key':'atlas-transcript-alex','title':'Ask Alex for the Atlas transcript','project_id':'atlas','waiting_on':'person:alex','follow_up_at':'2026-10-27','evidence_ids':[SID]}
     ob=store.track_obligation(payload); assert ob['status']=='waiting'; assert ob['due_at'] is None; assert ob['follow_up_at']=='2026-10-27'; assert len(ob['evidence'])==2
     again=store.track_obligation(payload); assert again['id']==ob['id']; assert len(store.snapshot()['obligations'])==2
     updated=store.review(ob['id'],ob['revision'],{'follow_up_at':'2026-10-26'}); assert updated['follow_up_at']=='2026-10-26'
-    with pytest.raises(ValueError): store.track_obligation(dict(payload,evidence_ids=['missing']))
+    with pytest.raises(ValueError): store.track_obligation(dict(payload,evidence_ids=[sid('missing')]))
 
 
 def test_connector_metadata_and_status_aliases(tmp_path):
@@ -170,11 +183,11 @@ def test_reviewed_mapping_survives_source_revisions(tmp_path):
 
 
 def test_draft_unions_direct_evidence_outside_project_mapping(tmp_path):
-    store=Store(tmp_path/'s.db'); a=source(); a['obligations']=[]; store.ingest([a]); b=source(); b.update(id='direct',projects=[],body='Important direct request'); store.ingest([b]); ob=store.snapshot()['obligations'][0]; draft=store.draft(ob['id']); assert {s['id'] for s in draft['evidence']}=={'direct','sym/demo/1'}; assert 'Important direct request' in draft['text']
+    store=Store(tmp_path/'s.db'); a=source(); a['obligations']=[]; store.ingest([a]); b=source(); b.update(id=sid('direct'),projects=[],body='Important direct request'); store.ingest([b]); ob=store.snapshot()['obligations'][0]; draft=store.draft(ob['id']); assert {s['id'] for s in draft['evidence']}=={sid('direct'),SID}; assert 'Important direct request' in draft['text']
 
 
 def test_missing_transcript_request_not_repeated_after_sent_or_answered(tmp_path):
-    store=Store(tmp_path/'s.db'); seed_demo(store); ob=next(o for o in store.snapshot()['obligations'] if o['intent_key']=='request-missing-transcript')
+    store=Store(tmp_path/'s.db'); seed_demo(store); ob=by_kind(store,'request-missing-transcript')
     ob=store.review(ob['id'],ob['revision'],{'question_state':'sent'}); assert 'Could you share' not in store.draft(ob['id'])['text']
     ob=store.review(ob['id'],ob['revision'],{'question_state':'answered'}); assert 'Could you share' not in store.draft(ob['id'])['text']
 
@@ -247,7 +260,7 @@ def test_unknown_ownership_is_review_not_personal_priority(tmp_path):
 
 def test_focus_prunes_finished_and_waiting_preserving_survivors(tmp_path):
     store=Store(tmp_path/'s.db')
-    obs=[store.track_obligation({'intent_key':str(i),'title':str(i),'status':'open'}) for i in range(3)]
+    obs=[store.track_obligation({'intent_key':f'focus-{i}','title':str(i),'status':'open'}) for i in range(3)]
     initial=store.snapshot()['today']; ids=initial['priorities']
     store.review(ids[0],1,{'status':'resolved'})
     store.review(ids[1],1,{'status':'waiting'})
@@ -259,7 +272,7 @@ def test_focus_prunes_finished_and_waiting_preserving_survivors(tmp_path):
 
 def test_explicit_priorities_are_revision_checked_and_persisted(tmp_path):
     path=tmp_path/'s.db'; store=Store(path)
-    obs=[store.track_obligation({'intent_key':str(i),'title':str(i),'status':'open'}) for i in range(4)]
+    obs=[store.track_obligation({'intent_key':f'focus-{i}','title':str(i),'status':'open'}) for i in range(4)]
     today=store.snapshot()['today']; selected=[obs[3]['id'],obs[0]['id']]
     result=store.set_priorities(selected,today['revision'])
     assert result['priorities']==selected and result['kind']=='pinned'
@@ -289,7 +302,7 @@ def test_room_bindings_route_existing_and_future_sources_without_ownership(tmp_p
     beacon=store.create_project('beacon','Beacon',rooms=[{'id':'room1','name':'Shared'}])
     assert {p['id'] for p in store.list_sources()[0]['projects']}=={'atlas','beacon'}
     assert len(store.project('atlas')['sources'])==1 and len(store.project('beacon')['sources'])==1
-    store.ingest([dict(a,id='future')]); assert len(store.project('beacon')['sources'])==2
+    store.ingest([dict(a,id=sid('future'))]); assert len(store.project('beacon')['sources'])==2
     assert store.snapshot()['obligations']==[]
     assert store.ingest([a])['unchanged']==1
     raw=__import__('json').loads(store.db.execute('SELECT payload FROM source_revisions WHERE id=?',(a['id'],)).fetchone()[0]); assert raw['projects']==[]
@@ -306,8 +319,8 @@ def test_project_config_update_conflict_removes_room_projection_and_respects_exp
     with pytest.raises(ConflictError): store.update_project('atlas',p['config_revision'],name='Stale')
     with pytest.raises(ConflictError): store.map_source(a['id'],mapped['mapping_revision'],[])
     store.update_project('atlas',updated['config_revision'],rooms=[{'id':'room1','name':'Shared'}])
-    explicit=source(); explicit.update(id='explicit',projects=[{'id':'beacon','name':'Beacon'}],obligations=[]); store.ingest([explicit])
-    assert {p['id'] for p in store._source('explicit')['projects']}=={'beacon'}
+    explicit=source(); explicit.update(id=sid('explicit'),projects=[{'id':'beacon','name':'Beacon'}],obligations=[]); store.ingest([explicit])
+    assert {p['id'] for p in store._source(sid('explicit'))['projects']}=={'beacon'}
     projected=store._source(a['id']); store.map_source(a['id'],projected['mapping_revision'],[])
     assert store._source(a['id'])['projects']==[]
 
@@ -318,7 +331,9 @@ def test_new_room_evidence_stales_draft_and_restart_preserves_bindings(tmp_path)
     incoming=source(); incoming.update(projects=[],obligations=[]); store.ingest([incoming])
     assert store.snapshot()['drafts'][0]['stale']
     store.db.execute('DELETE FROM source_projects WHERE source_id=?',(incoming['id'],)); store.db.commit()
-    restarted=Store(path); assert incoming['id'] in [s['id'] for s in restarted.project('atlas')['sources']]
+    # A restart no longer rebuilds projections (KAN-388); the explicit repair does.
+    restarted=Store(path); assert incoming['id'] not in [s['id'] for s in restarted.project('atlas')['sources']]
+    restarted.rebuild_projections(); assert incoming['id'] in [s['id'] for s in restarted.project('atlas')['sources']]
 
 
 def test_empty_plan_revision_conflicts_after_first_focus_arrives(tmp_path):

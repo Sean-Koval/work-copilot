@@ -1,0 +1,10 @@
+{
+  "schema": "work-copilot.overlay/v1",
+  "name": "example-co",
+  "placeholder": true,
+  "source": "orgs/example-co/org.yaml",
+  "work_site": "COMPANY-SITE.atlassian.net",
+  "kb_space": "COMPANY-SPACE",
+  "jira_project": "WORKPROJ",
+  "room": "the team's review room"
+}

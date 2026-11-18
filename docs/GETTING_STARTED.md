@@ -4,7 +4,18 @@ This is an early laptop prototype. **Python 3.11+ is required. Linux/Python 3.12
 
 ## 1. Install, then run the isolated check
 
-From a terminal with Git and Python installed:
+**One command, no clone.** With [uv](https://docs.astral.sh/uv/) (or pipx) and Git installed, on macOS, Windows or Linux:
+
+```sh
+uv tool install git+https://github.com/Sean-Koval/work-copilot
+work-copilot smoke
+```
+
+`pipx install git+https://github.com/Sean-Koval/work-copilot` works the same way. Without Git, use the archive: `uv tool install https://github.com/Sean-Koval/work-copilot/archive/refs/heads/main.zip`. If the shell then says `work-copilot` is not recognized, run `uv tool update-shell` (or `pipx ensurepath`) and open a new terminal. Upgrade with `uv tool upgrade work-copilot`. Then use `work-copilot` wherever this guide says `./run.sh`.
+
+This install takes the newest compatible dependencies, as CI's install check does; the clone's `run.sh` pins them with `constraints.txt`.
+
+**From a clone** (to read or change the code), from a terminal with Git and Python installed:
 
 ```sh
 git clone https://github.com/Sean-Koval/work-copilot.git
@@ -35,7 +46,15 @@ Check `py -3 --version` is 3.11 or newer first. macOS uses the shell commands ab
 
 Open **http://127.0.0.1:8765**. Review Today, This Week, project rooms/workstreams, waiting items, source passages and an offline reply draft. Copying or marking a local question sent does not send a message. Stop the service with Ctrl+C; restarting retains demo state.
 
-Demo state defaults to `~/.local/share/work-copilot-demo`; real state uses the separate `~/.local/share/work-copilot` (or the equivalent directories under `$XDG_DATA_HOME`). Neither belongs in the public checkout. To choose another private location, put `--data-dir` **before** the command:
+Demo state defaults to a `work-copilot-demo` folder; real state uses a separate `work-copilot` folder beside it:
+
+| OS | Folder |
+| --- | --- |
+| Windows | `%LOCALAPPDATA%` (usually `C:\Users\you\AppData\Local`) |
+| macOS | `~/Library/Application Support` |
+| Linux | `~/.local/share` |
+
+`$XDG_DATA_HOME` wins on any OS when set. On macOS and Windows, a folder that an earlier version left in `~/.local/share` keeps being used, and `doctor` reports it as `data_dir_note`; nothing is moved. Neither folder belongs in the public checkout. To choose another private location, put `--data-dir` **before** the command:
 
 ```sh
 ./run.sh --data-dir /absolute/private/copilot-demo demo
@@ -45,9 +64,21 @@ Demo state defaults to `~/.local/share/work-copilot-demo`; real state uses the s
 
 Choose an existing, approved **work-only Markdown folder**. Capture is recursive; do not select your whole personal vault. Choose your own IANA timezone; UTC is the default.
 
+The first capture writes one small file, `.work-copilot-vault.json`, in the folder's root. It names the folder, so a moved or re-synced folder keeps every note and its evidence links. Keep the file when you move the folder.
+
+To capture a copy as a second vault, delete that file in the copy first; two folders with the same id are refused. Notes captured before the file existed are renamed to it once, with the ids in Inbox note headers. If you moved the folder before upgrading, run `capture <vault> --moved-from <old folder>` once.
+
 ```sh
 ./run.sh --timezone America/New_York --data-dir /absolute/private/copilot serve --vault /absolute/work-vault
 ```
+
+Or let the wizard set it up: it creates the vault's `Notes`, `Meeting notes`, `Research` and `Decision write-ups` folders, the first project and the private data directory, then prints the `claude mcp add` line (on Windows, run it in PowerShell, not cmd.exe). It checks everything before creating anything, only creates what is missing and overwrites nothing. A new data directory gets owner-only permissions; an existing one is left as it is, with a warning if others can read it. On a terminal it asks for missing values; otherwise pass them all:
+
+```sh
+./run.sh --timezone America/New_York --data-dir /absolute/private/copilot init --wizard --vault /absolute/work-vault --project-id atlas --project-name Atlas
+```
+
+`WORK_COPILOT_DATA_DIR`, when set and not empty, is the default `--data-dir` (except for `demo`). Keep it per machine, never in shared configuration.
 
 1. Create a project in the dashboard with a stable ID, display name, known aliases and room IDs. A project can have several rooms; a room can belong to several projects. This creates local metadata, not remote rooms.
 2. Paste a short permitted note/transcript with **Capture note**, selecting its project/workstream, or drop a UTF-8 `.md` file into the selected folder.
@@ -60,7 +91,7 @@ See [Daily workflow](DAILY_WORKFLOW.md) for the regular loop and [connector/meta
 
 ## 4. Use the same state from an approved agent
 
-After installation, add a stdio MCP server using your client's supported configuration interface. This is a conventional configuration example, **not a verified installation recipe for a specific client/version**. Use absolute paths, the same real data directory as the dashboard, and your actual timezone:
+For Claude Code, run the `claude mcp add --scope user …` line that `init --wizard` printed; `doctor` prints it again when no registration is found. For other clients, add a stdio MCP server using the client's supported configuration interface. This is a conventional configuration example, **not a verified installation recipe for a specific client/version**. Use absolute paths, the same real data directory as the dashboard, and your actual timezone:
 
 ```json
 {
@@ -77,7 +108,7 @@ After installation, add a stdio MCP server using your client's supported configu
 }
 ```
 
-On Windows the Python executable is `.venv/Scripts/python.exe` (escape backslashes if using them in JSON). Omit `WORK_COPILOT_VAULT` if you do not want the agent to have the local `capture_note` tool. Explicit local tools can create projects, capture selected notes, track obligations and review local records. They cannot authorize or send external messages.
+On Windows the Python executable is `.venv/Scripts/python.exe` (escape backslashes if using them in JSON). With the one-command install, set `command` to the absolute path of `work-copilot` (`which work-copilot` on macOS or Linux, `(Get-Command work-copilot).Source` in PowerShell) and drop `"-m", "work_copilot"` from `args`. Omit `WORK_COPILOT_VAULT` if you do not want the agent to have the local `capture_note` tool. Explicit local tools can create projects, capture selected notes, track obligations and review local records. They cannot authorize or send external messages.
 
 Ask the client to list projects, retrieve one source passage, then track a fictional waiting item before using sensitive work context. Inspect the receipt and dashboard. The client—not this service—interprets natural language and chooses its model. Running this store locally does **not** guarantee your client's model processes data locally; obtain the required company approval first.
 
@@ -87,7 +118,17 @@ Ask the client to list projects, retrieve one source passage, then track a ficti
 ./run.sh --data-dir /absolute/private/copilot doctor --vault /absolute/work-vault
 ```
 
-Doctor inspects local readiness; it does not authorize or contact a server. For an approved Symphony OAuth MCP endpoint, follow [Symphony MCP setup](SYMPHONY_MCP.md). Endpoint tools, scopes and response schema must be verified against your actual server. No vendor-specific Jira/GitHub/Confluence integration or live company-server test is implied by the fictional demo or smoke result.
+Doctor inspects local readiness; it does not authorize or contact a server. It also reports whether Claude Code has a `work-copilot` server registered (user scope, or local scope and `.mcp.json` for the project's git root, else the current directory; and whether it uses the same data directory), whether the vault sits in OneDrive, iCloud, Dropbox or Google Drive (company notes copied into personal sync) or under a symlink, whether a company overlay is applied, and whether a team `rules.json` beside the database is valid (the dashboard and MCP server refuse to start on a bad one). Each reports `ok`, `warning` or `error`, with a `fix` when not ok; it only reads files. The company overlay names the work site, knowledge space, Jira project and review room this install serves. team-harness renders it from the company's org overlay (`python3 scripts/work_copilot_overlay.py --harness <name> --out /absolute/work-copilot-overlay.json`, `py -3` on Windows; its `install_local.py` prints the same commands). Apply it with this launcher, which changes to its own directory, so give the file's absolute path: `./run.sh --data-dir /absolute/private/copilot overlay apply /absolute/work-copilot-overlay.json` (on Windows, `.\run.ps1` with the same arguments). That checks it and records it as `overlay.json` in the data directory, and `overlay show` prints it. It holds places, never credentials, and applying it contacts nothing. A placeholder overlay (the public example) is reported as a warning. For an approved Symphony OAuth MCP endpoint, follow [Symphony MCP setup](SYMPHONY_MCP.md). Endpoint tools, scopes and response schema must be verified against your actual server. No vendor-specific Jira/GitHub/Confluence integration or live company-server test is implied by the fictional demo or smoke result.
+
+### Upgrades, backups and moving your data
+
+The database records its schema version. When a new Work Copilot changes the schema, the first start migrates it in ordered steps, after copying the old database to `backups/` in your data folder. A database from a newer Work Copilot is refused, not opened. `doctor` shows the schema version and the backups.
+
+A backup holds captured text, so the five newest are kept and any older than 30 days is deleted on the next start. Text that expires or that you `forget` is cleared inside each backup too.
+
+Search and project links are kept current as records arrive, so a normal start does not rebuild them. If search ever looks wrong, `doctor --repair` rebuilds them from the recorded state; it changes nothing else.
+
+To back up or move everything, `work-copilot --data-dir <dir> export --jsonl state.jsonl` writes all local state to one JSONL file. `work-copilot --data-dir <new empty dir> import --jsonl state.jsonl` restores it; import never merges into or overwrites an existing database. The file holds your captured work text, so keep it in the same approved storage as the data folder.
 
 ### Common first-run issues
 
@@ -99,4 +140,4 @@ Doctor inspects local readiness; it does not authorize or contact a server. For 
 - **Vault rejected:** symlinked roots/paths are not supported. Select an actual work-only folder; do not broaden filesystem permissions blindly.
 - **Smoke fails:** keep its failing phase and error when reporting the problem. The synthetic check contains no work payload; review any additional logs before sharing. A successful smoke is not proof of live connector or actual-client compatibility.
 
-The app does not encrypt your SQLite/Markdown files, supply backups, enforce live enterprise ACLs, or stay awake when the laptop sleeps. Use approved local storage and keep private state out of Git. Nothing in these steps deploys a cloud service or installs a startup agent.
+The app does not encrypt your SQLite/Markdown files or its backups, schedule backups, enforce live enterprise ACLs, or stay awake when the laptop sleeps. Use approved local storage and keep private state out of Git. Nothing in these steps deploys a cloud service or installs a startup agent.

@@ -59,11 +59,11 @@ For engineering replies, keep claims separate: **planned → implemented → mer
 Choose **Track waiting / action**:
 
 - Describe the distinct request.
-- Use a stable intent key, such as `atlas-workshop-transcript`.
+- Use a stable intent key: a lower-case ask kind, such as `atlas-workshop-transcript`, or `<source id>:<ask kind>` to join an ask a source already carries.
 - Choose project, owner, and state; leave uncertain ownership unresolved.
 - Set an optional follow-up time. Record a promised due date and mark an explicit commitment only when warranted. Name the waiting-on dependency if known. Add supporting context or source references where available.
 
-Reuse the same project/intent for the same request. Different questions in one room need distinct intents. For example, “build the skill,” “update the Jira ticket,” and “send the team a status answer” are separate obligations: completing code does not complete the ticket update or inform the team. The app deduplicates explicit keys, not arbitrary similar prose. Review pending/sent/answered state before asking again.
+Reuse the same intent key for the same request. Different questions in one room need distinct intents. For example, “build the skill,” “update the Jira ticket,” and “send the team a status answer” are separate obligations: completing code does not complete the ticket update or inform the team. The app deduplicates explicit keys, not arbitrary similar prose. Review pending/sent/answered state before asking again.
 
 ### Example: three projects, nine distinct obligations
 
@@ -104,4 +104,4 @@ Open the generated Markdown in Obsidian to inspect project context and source pa
 - **Source changed after a draft:** refresh and regenerate before copying.
 - **No expected results:** loosen lexical search filters, then inspect coverage and the selected vault. An absent result is not proof the event never happened.
 - **Auth error:** follow [OAuth MCP setup](SYMPHONY_MCP.md); a successful login alone does not prove catch-up completeness or ACL coverage.
-- **Local setup unclear:** run `./run.sh --data-dir /absolute/private/copilot --timezone America/New_York doctor --vault /absolute/path/to/work-vault`, replacing the example paths/timezone with those used by your running service. Diagnostics inspect local setup, not company authorization or end-to-end agent behavior.
+- **Local setup unclear:** run `./run.sh --data-dir /absolute/private/copilot --timezone America/New_York doctor --vault /absolute/path/to/work-vault`, replacing the example paths/timezone with those used by your running service (`work-copilot` in place of `./run.sh` for an installed copy). Diagnostics inspect local setup, not company authorization or end-to-end agent behavior.
