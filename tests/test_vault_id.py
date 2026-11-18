@@ -88,7 +88,8 @@ def test_old_path_hash_ids_are_migrated_once(setup, monkeypatch):
     assert [o[2] for o in obligations] == [tuple(e.replace(legacy, vault_id) for e in o[2]) for o in old_obligations]
     store.close()
     db = sqlite3.connect(tmp_path / 'copilot.db')
-    dump = '\n'.join(db.iterdump())
+    # Only the alias that lets backups taken before the rename be cleared still names it.
+    dump = '\n'.join(line for line in db.iterdump() if f"'vault-alias:{legacy}'" not in line)
     assert legacy not in dump
     db.close()
     store = Store(tmp_path / 'copilot.db')
@@ -334,3 +335,29 @@ def test_the_first_rename_backs_up_the_database_first(setup, monkeypatch):
     # Nothing left to rename: no second backup.
     assert 'backup_before_rename' not in capture_vault(store, root)
     assert schema.backups(tmp_path / 'copilot.db') == [backup]
+
+
+def test_a_forgotten_note_stays_forgotten_after_the_rename(setup, monkeypatch):
+    _, root, store = setup
+    legacy = _legacy_capture(monkeypatch, store, root)
+    store.forget(f'vault:{legacy}:loose.md')
+    report = capture_vault(store, root)
+    vault_id = report['vault_id']
+    assert report['migrated_note_ids'] == 1
+    # The marker moved with the namespace, so the note is not captured again (KAN-390).
+    assert {s['id'] for s in store.list_sources()} == {f'vault:{vault_id}:Meetings/release.md'}
+    capture_vault(store, root)
+    assert {s['id'] for s in store.list_sources()} == {f'vault:{vault_id}:Meetings/release.md'}
+
+
+def test_text_forgotten_after_the_rename_is_cleared_from_the_backup_taken_before_it(setup, monkeypatch):
+    _, root, store = setup
+    _legacy_capture(monkeypatch, store, root)
+    report = capture_vault(store, root)
+    backup = Path(report['backup_before_rename'])
+    assert b'Ship Thursday' in backup.read_bytes()
+    result = store.forget(f"vault:{report['vault_id']}:Meetings/release.md")
+    assert result['backups_cleared'] == 1 and result['backups_left'] == 0
+    # The backup still names the note by its old id; the alias recorded at the rename finds it.
+    assert b'Ship Thursday' not in backup.read_bytes()
+    assert backup.exists()
