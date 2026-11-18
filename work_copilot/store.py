@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from filelock import FileLock
 from .join_key import FIELDS as JOIN_FIELDS, join_fields, neutralise
-from .knowledge import ENVELOPE_VERSION, validate_envelope
+from .knowledge import ENVELOPE_VERSION, OBLIGATION_STATUSES, validate_envelope
 from . import schema
 from .rules import Rules
 from .ids import intent_key as make_intent_key, is_intent_key, parse_intent_key, tracked_intent_key, validate_source_id
@@ -554,7 +554,7 @@ class Store:
 
     @staticmethod
     def _validate_changes(changes):
-        if 'status' in changes and changes['status'] not in ('candidate','open','waiting','resolved','dismissed'):
+        if 'status' in changes and changes['status'] not in OBLIGATION_STATUSES:
             raise ValueError('Invalid obligation status')
         if 'question_state' in changes and changes['question_state'] not in ('pending','sent','answered'):
             raise ValueError('Invalid question state')

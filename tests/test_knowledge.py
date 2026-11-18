@@ -30,6 +30,7 @@ CONTRACT_SHA256 = 'eda789937b670f3bc527ebffc366464af650bf3464defab33e084b0409444
 # ai-dlc contracts/knowledge-record.versions.toml, copied with the schema (KAN-504): it
 # publishes the canonical SHA-256 of the schema for each FORMAT_VERSION.
 VERSIONS = CONTRACT.with_name('knowledge-record.versions.toml')
+VERSIONS_SHA256 = '623ae4a81f9208e335440783872e529ac8a3bcc465017cefe4a1868baac367df'
 FIXTURES = Path(__file__).parent / 'fixtures' / 'knowledge_export'
 NOW = datetime(2026, 11, 12, 18, 0, tzinfo=timezone.utc)
 SOURCES = [
@@ -97,18 +98,35 @@ def canonical_sha256(value):
 def test_vendored_contract_matches_a_published_format_version():
     published = schema()
     versions = tomllib.loads(VERSIONS.read_text(encoding='utf-8'))['versions']
-    claimed = versions[str(published['x-format-version'])]
+    key = str(published['x-format-version'])
+    assert key in versions, f'format version {key} is not published in {VERSIONS.name}; refresh it with the schema'
+    claimed = versions[key]
     digest = canonical_sha256(published)
     assert digest not in claimed.get('superseded', []), 'vendored schema is a stale copy of its format version'
     assert digest == claimed['sha256']
-    assert str(RECORD_FORMAT_VERSION) in versions
+    assert hashlib.sha256(VERSIONS.read_bytes()).hexdigest() == VERSIONS_SHA256
+
+
+def enum_of(prop):
+    """A property's enum, also when it is nullable (``anyOf`` with ``null``)."""
+    found = [prop['enum']] if 'enum' in prop else [p['enum'] for p in prop.get('anyOf', []) if 'enum' in p]
+    assert len(found) == 1, prop
+    return tuple(found[0])
 
 
 def test_scopes_and_statuses_come_from_the_contract():
-    properties = schema()['properties']
-    obligation = schema()['$defs']['Obligation']['properties']
-    assert tuple(properties['scope']['enum']) == SCOPES
-    assert tuple(obligation['status']['anyOf'][0]['enum']) == OBLIGATION_STATUSES
+    import subprocess
+    from typing import get_args
+
+    from work_copilot.mcp_server import ObligationStatus
+
+    published = schema()
+    assert enum_of(published['properties']['scope']) == SCOPES
+    assert enum_of(published['$defs']['Obligation']['properties']['status']) == OBLIGATION_STATUSES
+    assert get_args(ObligationStatus) == OBLIGATION_STATUSES
+    # The CLI keeps its own literal so a hook run never imports pydantic; its help shows the choices.
+    shown = subprocess.run([sys.executable, '-m', 'work_copilot', 'export', '--help'], capture_output=True, text=True, check=True).stdout
+    assert '{' + ','.join(SCOPES) + '}' in shown
 
 
 def test_exported_records_match_the_contract_and_fixtures(store, repo):
