@@ -331,7 +331,9 @@ def test_new_room_evidence_stales_draft_and_restart_preserves_bindings(tmp_path)
     incoming=source(); incoming.update(projects=[],obligations=[]); store.ingest([incoming])
     assert store.snapshot()['drafts'][0]['stale']
     store.db.execute('DELETE FROM source_projects WHERE source_id=?',(incoming['id'],)); store.db.commit()
-    restarted=Store(path); assert incoming['id'] in [s['id'] for s in restarted.project('atlas')['sources']]
+    # A restart no longer rebuilds projections (KAN-388); the explicit repair does.
+    restarted=Store(path); assert incoming['id'] not in [s['id'] for s in restarted.project('atlas')['sources']]
+    restarted.rebuild_projections(); assert incoming['id'] in [s['id'] for s in restarted.project('atlas')['sources']]
 
 
 def test_empty_plan_revision_conflicts_after_first_focus_arrives(tmp_path):

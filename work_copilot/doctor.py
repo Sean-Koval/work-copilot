@@ -87,8 +87,10 @@ def _result(directory, database, connectors, projects, timezone_name, vault, con
             settings=load_config(config)
             state=next((c for c in connectors if c.get('name')==settings['name']),None)
             selected=settings.get('tool')
-            ready=bool(selected and selected in settings.get('allowed_read_tools',[]))
-            checks['connector']={'ok':bool(state and state.get('status')=='healthy'),'status':state.get('status') if state else 'auth_or_discovery_required','name':settings['name'],'allowed_read_tools':settings.get('allowed_read_tools',[]),'collection_configured':ready,'last_success':state.get('last_success') if state else None,'gap_since':state.get('gap_since') if state else None,'note':'Configuration inspected offline; remote schemas, capabilities and credential validity were not probed. '+('Read tool selected; verify its arguments and mapping with your administrator.' if ready else 'Run explicit connect --authorize when approved, then select a verified tool in allowed_read_tools and configure arguments/mapping before collection.')}
+            from .remote_mcp import capture_settings
+            capture=capture_settings(settings)
+            ready=bool(selected and selected in settings.get('allowed_read_tools',[]) and capture)
+            checks['connector']={'ok':bool(state and state.get('status')=='healthy'),'status':state.get('status') if state else 'auth_or_discovery_required','name':settings['name'],'allowed_read_tools':settings.get('allowed_read_tools',[]),'collection_configured':ready,'capture':{'rooms':capture['rooms'],'spaces':capture['spaces'],'retention_days':capture['retention_days']} if capture else {'rooms':[],'spaces':[],'retention_days':None,'note':'No rooms or spaces picked; collection is refused until capture.rooms or capture.spaces is set.'},'last_success':state.get('last_success') if state else None,'gap_since':state.get('gap_since') if state else None,'note':'Configuration inspected offline; remote schemas, capabilities and credential validity were not probed. '+('Read tool selected; verify its arguments and mapping with your administrator.' if ready else 'Run explicit connect --authorize when approved, then select a verified tool in allowed_read_tools and configure arguments/mapping before collection.')}
             checks['oauth_storage']=_storage_check(directory)
         except ValueError as exc:
             # load_config emits field-only validation errors, not input values.
