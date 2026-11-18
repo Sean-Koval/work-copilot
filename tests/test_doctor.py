@@ -1,4 +1,4 @@
-from work_copilot.doctor import diagnose
+from work_copilot.doctor import diagnose, diagnose_path
 from work_copilot.store import Store
 
 
@@ -109,3 +109,14 @@ def test_compatibility_doctor_snapshots_custom_database_name(tmp_path):
     assert result['timezone']=='Asia/Tokyo'
     assert before=={p.name:(p.read_bytes(),p.stat().st_mtime_ns,p.stat().st_mode) for p in tmp_path.iterdir()}
     store.close()
+
+
+def test_doctor_reports_schema_version(tmp_path):
+    import sqlite3
+    from work_copilot.schema import SCHEMA_VERSION
+    Store(tmp_path/'copilot.db').close()
+    database=diagnose_path(tmp_path)['checks']['database']
+    assert database['ok'] and database['schema_version']==SCHEMA_VERSION==database['supported_schema_version']
+    db=sqlite3.connect(tmp_path/'copilot.db'); db.execute(f'PRAGMA user_version={SCHEMA_VERSION+1}'); db.commit(); db.close()
+    database=diagnose_path(tmp_path)['checks']['database']
+    assert database['ok'] is False and database['status']=='newer_schema'

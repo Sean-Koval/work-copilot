@@ -14,6 +14,8 @@ from pathlib import Path
 from filelock import FileLock
 from .join_key import FIELDS as JOIN_FIELDS, join_fields, neutralise
 from .knowledge import ENVELOPE_VERSION, validate_envelope
+from . import schema
+from .rules import Rules
 
 
 class ConflictError(ValueError):
@@ -39,7 +41,7 @@ def _id(value):
 
 
 class Store:
-    def __init__(self, path, now=None, timezone_name=None):
+    def __init__(self, path, now=None, timezone_name=None, rules=None):
         self.timezone_name=timezone_name or os.environ.get("WORK_COPILOT_TIMEZONE", "UTC")
         try:
             self.timezone=ZoneInfo(self.timezone_name)
@@ -47,6 +49,8 @@ class Store:
             raise ValueError("Unknown IANA timezone: "+self.timezone_name) from exc
         self.path = Path(path).resolve()
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        # Team rules (owner, draft wording); rules.json beside the database overrides the defaults.
+        self.rules = rules if rules is not None else Rules.load(self.path.parent)
         self._clock = now or (lambda: datetime.now(timezone.utc))
         self._lock = threading.RLock()
         # Include connection PRAGMAs: journal_mode can race before SQLite's
@@ -65,27 +69,12 @@ class Store:
         self.db.row_factory = sqlite3.Row
         self.db.execute('PRAGMA journal_mode=WAL')
         self.db.execute('PRAGMA foreign_keys=ON')
-        self.db.executescript('''
-        CREATE VIRTUAL TABLE IF NOT EXISTS source_search USING fts5(source_id UNINDEXED,title,body,project_terms);
-        CREATE TABLE IF NOT EXISTS sources(id TEXT PRIMARY KEY, revision TEXT NOT NULL, payload TEXT NOT NULL, connector TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS source_revisions(id TEXT NOT NULL,revision TEXT NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(id,revision));
-        CREATE TABLE IF NOT EXISTS source_mappings(source_id TEXT PRIMARY KEY,revision INTEGER NOT NULL,projects TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY,name TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS project_config(project_id TEXT PRIMARY KEY,aliases TEXT NOT NULL,rooms TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS source_projects(source_id TEXT NOT NULL,project_id TEXT NOT NULL,workstream TEXT NOT NULL DEFAULT '',PRIMARY KEY(source_id,project_id,workstream));
-        CREATE TABLE IF NOT EXISTS obligations(id TEXT PRIMARY KEY, canonical TEXT UNIQUE NOT NULL,payload TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS source_intents(source_id TEXT NOT NULL,candidate_key TEXT NOT NULL,obligation_id TEXT NOT NULL,PRIMARY KEY(source_id,candidate_key));
-        CREATE TABLE IF NOT EXISTS manual_evidence(obligation_id TEXT NOT NULL,source_id TEXT NOT NULL,PRIMARY KEY(obligation_id,source_id));
-        CREATE TABLE IF NOT EXISTS evidence(obligation_id TEXT NOT NULL,source_id TEXT NOT NULL,PRIMARY KEY(obligation_id,source_id));
-        CREATE TABLE IF NOT EXISTS drafts(id TEXT PRIMARY KEY,payload TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS connectors(name TEXT PRIMARY KEY,payload TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS local_metadata(key TEXT PRIMARY KEY,payload TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS plans(day TEXT PRIMARY KEY,payload TEXT NOT NULL);
-        ''')
-        # Serialize schema inspection and projection rebuild across UI/MCP startup.
+        # Ordered migrations, with a backup first when the database already holds data.
+        self.migration=schema.migrate(self.db,self.path)
+        # Backups hold captured text; keep none past the retention limit.
+        schema.prune_backups(self.path)
+        # Serialize projection rebuild across UI/MCP startup.
         self.db.execute('BEGIN IMMEDIATE')
-        if 'revision' not in {row['name'] for row in self.db.execute('PRAGMA table_info(project_config)')}:
-            self.db.execute('ALTER TABLE project_config ADD COLUMN revision INTEGER NOT NULL DEFAULT 1')
         # Rebuildable projection; migration also indexes pre-search databases.
         self.db.execute('DELETE FROM source_search')
         self._rebuild_project_projections(invalidate_drafts=False)
@@ -130,6 +119,66 @@ class Store:
     def close(self):
         with self._lock:
             self.db.close()
+
+    def export_jsonl(self, destination):
+        """Write all recorded state as JSONL (one consistent snapshot); restore with import_jsonl.
+
+        A read transaction: in WAL mode other processes keep writing meanwhile.
+        """
+        with self._lock:
+            self.db.execute('BEGIN')
+            try:
+                return schema.export_jsonl(self.db,destination,self.now().isoformat())
+            finally:
+                self.db.rollback()
+
+    @classmethod
+    def import_jsonl(cls, source, path, **options):
+        """Restore an export into a new database at ``path`` and open it.
+
+        Built beside the target, opened and checked there, and only then moved into place, so
+        a failed import leaves nothing behind and never touches an existing database.
+        """
+        path=Path(path).resolve()
+        path.parent.mkdir(parents=True,exist_ok=True)
+        staging=path.with_name(path.name+'.importing')
+        with FileLock(str(path)+'.init.lock',timeout=30,mode=0o600):
+            for existing in (path,*schema._sidecars(path)):
+                if existing.exists():
+                    raise ValueError(f'{existing} already exists; import restores into an empty data folder only')
+            for leftover in (staging,*schema._sidecars(staging)):
+                leftover.unlink(missing_ok=True)
+            try:
+                result=schema.import_jsonl(source,staging)
+                check=cls(staging,**options)
+                try:
+                    # Read every record back through the store, then discard any plan it anchors.
+                    check.db.execute('BEGIN')
+                    try:
+                        check.snapshot()
+                    finally:
+                        check.db.rollback()
+                    check.db.execute('PRAGMA journal_mode=DELETE')
+                finally:
+                    check.close()
+                try:
+                    staging.chmod(0o600)
+                except OSError:
+                    pass
+                if any(sidecar.exists() for sidecar in schema._sidecars(path)):
+                    raise ValueError('A database journal appeared beside the target during import; nothing was restored')
+                os.replace(staging,path)
+                # Report where the database now is, not the staging file it was built in.
+                result['path']=str(path)
+            except Exception as exc:
+                for leftover in (staging,*schema._sidecars(staging)):
+                    leftover.unlink(missing_ok=True)
+                if isinstance(exc,ValueError):
+                    raise
+                raise ValueError(f'Export holds records this Work Copilot cannot open ({type(exc).__name__}: {exc})') from exc
+            finally:
+                Path(str(staging)+'.init.lock').unlink(missing_ok=True)
+        return cls(path,**options),result
 
     def _rows(self, table):
         return [json.loads(row['payload']) for row in self.db.execute(f'SELECT payload FROM {table}')]
@@ -291,6 +340,8 @@ class Store:
                         self.db.execute('INSERT OR IGNORE INTO projects VALUES(?,?)',(project['id'],project.get('name',project['id'])))
                         self.db.execute('INSERT OR IGNORE INTO source_projects VALUES(?,?,?)',(source['id'],project['id'],project.get('workstream','')))
                     for candidate in source['obligations']:
+                        if 'owner' in candidate:
+                            candidate={**candidate,'owner':self.rules.owner(candidate['owner'])}
                         canonical=_json([candidate.get('project_id'),candidate['intent_key']])
                         existing_row=self.db.execute('SELECT obligation_id FROM source_intents WHERE source_id=? AND candidate_key=?',(source['id'],canonical)).fetchone()
                         if not existing_row:
@@ -301,7 +352,7 @@ class Store:
                         exists=existing_row
                         if not exists:
                             owner=candidate.get('owner')
-                            ob={'id':oid,'intent_key':candidate['intent_key'],'title':candidate['title'],'project_id':candidate.get('project_id'),'owner':owner,'status':candidate.get('status','open' if owner=='me' else 'candidate'),'question_state':candidate.get('question_state','pending'),'due_at':candidate.get('due_at'),'follow_up_at':candidate.get('follow_up_at'),'waiting_on':candidate.get('waiting_on'),'commitment':bool(candidate.get('commitment',False)),'revision':1,'created_at':self.now().isoformat(),'reviewed':False}
+                            ob={'id':oid,'intent_key':candidate['intent_key'],'title':candidate['title'],'project_id':candidate.get('project_id'),'owner':owner,'status':candidate.get('status',self.rules.initial_status(owner)),'question_state':candidate.get('question_state','pending'),'due_at':candidate.get('due_at'),'follow_up_at':candidate.get('follow_up_at'),'waiting_on':candidate.get('waiting_on'),'commitment':bool(candidate.get('commitment',False)),'revision':1,'created_at':self.now().isoformat(),'reviewed':False}
                             self._validate_changes(ob)
                             self.db.execute('INSERT INTO obligations VALUES(?,?,?)',(oid,canonical,_json(ob)))
                         if exists:
@@ -353,6 +404,8 @@ class Store:
         if not isinstance(changes,dict) or not changes or set(changes)-allowed:
             raise ValueError('Unsupported review fields')
         self._validate_changes(changes)
+        if 'owner' in changes:
+            changes={**changes,'owner':self.rules.owner(changes['owner'])}
         with self._transaction():
             ob=self._obligation(id)
             if ob['revision'] != revision:
@@ -398,7 +451,7 @@ class Store:
             active=[o for o in obligations if o['status'] not in ('resolved','dismissed')]
             row=self.db.execute('SELECT payload FROM plans WHERE day=?',(day,)).fetchone()
             existing=json.loads(row[0]) if row else None
-            eligible=[o for o in active if o.get('owner')=='me' and o['status']=='open']
+            eligible=[o for o in active if self.rules.is_mine(o) and o['status']=='open']
             eligible_ids={o['id'] for o in eligible}
             if existing and (existing.get('anchored') or existing['priorities']):
                 today=existing
@@ -441,20 +494,16 @@ class Store:
             if not ob.get('owner'): gaps.append('Ownership is not confirmed.')
             if not evidence: gaps.append('No current source evidence is available.')
             if not ob.get('due_at'): gaps.append('No deadline is established.')
-            gaps.append('Deployment is not verified unless explicitly evidenced; a merged PR alone is not deployment.')
+            gaps.extend(self.rules.standing_gaps)
             direct={s['id'] for s in ob['evidence']}
             evidence.sort(key=lambda source:(source['id'] not in direct,source['id']))
-            if any(word in ob['intent_key'].lower() for word in ('release','deployment')) and len(evidence)>1:
-                engineering=next((source for source in evidence[1:] if 'github' in source['provider'].lower()),None)
-                if engineering:
-                    evidence.remove(engineering)
-                    evidence.insert(1,engineering)
-            if ob['intent_key']=='request-missing-transcript' and ob['question_state']=='sent':
-                lines=['The transcript request is already recorded as sent. Check for a response before sending another request.']
-            elif ob['intent_key']=='request-missing-transcript' and ob['question_state']=='answered':
-                lines=['The transcript request is recorded as answered. Review the received evidence; do not request it again automatically.']
-            elif ob['intent_key']=='request-missing-transcript':
-                lines=['Could you share the meeting transcript or notes when available? I do not have the transcript, so I cannot yet summarize the discussion or confirm its decisions.']
+            evidence=self.rules.order_evidence(ob,evidence)
+            canned=self.rules.reply(ob)
+            rule_name=None
+            if canned:
+                # Rule text is not evidence; say where it came from.
+                rule_name,lines=canned
+                gaps.append(f'This text comes from the team rule {rule_name}, not from the evidence listed.')
             else:
                 lines=[]
                 for index,source in enumerate(evidence[:2],1):
@@ -462,19 +511,14 @@ class Store:
                     lines.append(f'Observed source [{index}] says: “{excerpt}”')
                 if not evidence:
                     lines.append('I do not have current evidence to give a reliable status yet.')
-                if any(word in ob['intent_key'].lower() for word in ('release','deployment')):
-                    lines.append('Deployment is not verified by this evidence packet; merged code is not a deployment receipt. No delivery date is established here.')
-                if ob['question_state']=='sent':
-                    lines.append('A clarification is already recorded as sent; check for a response rather than ask again.')
-                elif ob['question_state']=='answered':
-                    lines.append('This intent is already recorded as answered; check whether another reply is needed.')
+                lines.extend(self.rules.notes(ob))
             freshness=self._freshness(evidence)
             if freshness!='observed':
                 gaps.append('Evidence is '+freshness+'; refresh or obtain missing evidence before relying on this draft.')
             did='draft-'+id
             prior=self.db.execute('SELECT payload FROM drafts WHERE id=?',(did,)).fetchone()
             revision=json.loads(prior[0])['revision']+1 if prior else 1
-            draft={'id':did,'obligation_id':id,'text':'\n\n'.join(lines),'revision':revision,'mode':'offline_template','stale':freshness!='observed','evidence':evidence,'gaps':gaps,'reviewed':False,'source_revisions':{s['id']:s.get('mapping_revision',s['revision']) for s in evidence},'obligation_revision':ob['revision'],'created_at':self.now().isoformat()}
+            draft={'id':did,'obligation_id':id,'text':'\n\n'.join(lines),'revision':revision,'mode':'offline_template','rule':rule_name,'stale':freshness!='observed','evidence':evidence,'gaps':gaps,'reviewed':False,'source_revisions':{s['id']:s.get('mapping_revision',s['revision']) for s in evidence},'obligation_revision':ob['revision'],'created_at':self.now().isoformat()}
             self.db.execute('INSERT OR REPLACE INTO drafts VALUES(?,?)',(did,_json(draft)))
             return draft
 
@@ -558,7 +602,7 @@ class Store:
         ``tracker``, ``work_id`` and ``session_key`` are the ai-dlc session join key
         (KAN-383); they are kept only on the call that creates the record. A repeat
         call with the same project and ``intent_key`` returns the existing record as
-        it is, so a different tracker on the repeat is ignored, not merged.
+        it is, so a different tracker on the repeat is ignored, not combined with the first.
         """
         allowed={'intent_key','title','project_id','owner','status','waiting_on','follow_up_at','due_at','question_state','commitment','evidence_ids','body',*JOIN_FIELDS}
         if not isinstance(payload,dict) or set(payload)-allowed or not all(isinstance(payload.get(k),str) and payload[k].strip() for k in ('intent_key','title')):
@@ -568,7 +612,8 @@ class Store:
             raise ValueError('Body must be text of at most 100000 characters')
         join=join_fields(payload)
         candidate={k:v for k,v in payload.items() if k not in ('evidence_ids','body',*JOIN_FIELDS)}
-        candidate.setdefault('owner','me'); candidate.setdefault('status','waiting')
+        candidate.setdefault('owner',self.rules.self_owner); candidate.setdefault('status','waiting')
+        candidate['owner']=self.rules.owner(candidate['owner'])
         self._validate_changes(candidate)
         ids=payload.get('evidence_ids',[])
         if not isinstance(ids,list) or not all(isinstance(sid,str) for sid in ids):
@@ -639,7 +684,7 @@ class Store:
                     oid=ob['id']
                 else:
                     oid=_id(canonical)
-                    ob={'id':oid,'intent_key':'review:'+item['key'],'kind':'review',**values,'project_id':None,'owner':'me','status':'open','question_state':'pending','follow_up_at':None,'waiting_on':None,'commitment':False,'revision':1,'created_at':self.now().isoformat(),'reviewed':True}
+                    ob={'id':oid,'intent_key':'review:'+item['key'],'kind':'review',**values,'project_id':None,'owner':self.rules.self_owner,'status':'open','question_state':'pending','follow_up_at':None,'waiting_on':None,'commitment':False,'revision':1,'created_at':self.now().isoformat(),'reviewed':True}
                     self.db.execute('INSERT INTO obligations VALUES(?,?,?)',(oid,canonical,_json(ob)))
                     opened.append(oid)
                 self.db.execute('INSERT OR IGNORE INTO evidence VALUES(?,?)',(oid,sid))
@@ -710,7 +755,7 @@ class Store:
                 raise ConflictError('Today changed; reload before pinning priorities')
             for oid in ids:
                 ob=self._obligation(oid)
-                if ob.get('owner')!='me' or ob['status']!='open':
+                if not self.rules.is_mine(ob) or ob['status']!='open':
                     raise ValueError('Only personally owned open obligations can be pinned')
             today.update(priorities=list(ids),kind='pinned',revision=revision+1,anchored=True)
             today.pop('new_urgency',None)
