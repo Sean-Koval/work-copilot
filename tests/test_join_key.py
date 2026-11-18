@@ -222,8 +222,9 @@ def test_export_links_only_a_ticket_key(tmp_path):
 
 def test_a_receipt_without_a_key_keeps_its_pre_kan_383_revision(tmp_path):
     store = Store(tmp_path / 's.db')
-    # The revision main computed for this event before the join key existed.
-    assert ingest_activity(store, event())['revision'] == 'f0f7afdbf5dd9b7eb90960ef05e3ef675886d0950d2fe391df466b0e5f10b3f8'
+    # The revision computed for this event without the join key code, with KAN-392's
+    # provider:site:object activity ids (the id is part of the hashed payload).
+    assert ingest_activity(store, event())['revision'] == '8e515e6c98ac0dfa86de3f5def0d3e3163e3174a48cc1dfa446dc6879f745b20'
     assert 'join' not in store.list_sources(provider='local-activity')[0]
     keyed = ingest_activity(store, event(event_id='e2'), env=SESSION)
     assert next(s for s in store.list_sources(provider='local-activity') if s['id'] == keyed['source_id'])['join']

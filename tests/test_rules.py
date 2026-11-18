@@ -7,10 +7,11 @@ import pytest
 from work_copilot.demo import seed_demo
 from work_copilot.rules import DEFAULT_RULES, RULES_FILE, Rules
 from work_copilot.store import Store
+from work_copilot.ids import ask_kind
 
 
-def _obligation(store, intent_key):
-    return next(o for o in store.snapshot()['obligations'] if o['intent_key'] == intent_key)
+def _obligation(store, kind):
+    return next(o for o in store.snapshot()['obligations'] if ask_kind(o['intent_key']) == kind)
 
 
 def test_store_holds_no_domain_words():
@@ -53,9 +54,9 @@ def test_rules_file_changes_aliases_and_wording(tmp_path):
         'intents': [{'name': 'handover', 'kinds': ['Handover'], 'replies': {'pending': 'Handover notes are not shared yet.'}}],
     })
     store = Store(tmp_path / 's.db')
-    store.ingest([{'id': 'a', 'revision': '1', 'provider': 'notes', 'title': 'Handover', 'body': 'Need the handover.',
-                   'obligations': [{'intent_key': 'handover', 'title': 'Get handover', 'owner': 'sean '},
-                                   {'intent_key': 'release-x', 'title': 'Release x', 'owner': 'alex'}]}])
+    store.ingest([{'id': 'notes:local:a', 'revision': '1', 'provider': 'notes', 'title': 'Handover', 'body': 'Need the handover.',
+                   'obligations': [{'intent_key': 'notes:local:a:handover', 'title': 'Get handover', 'owner': 'sean '},
+                                   {'intent_key': 'notes:local:a:release-x', 'title': 'Release x', 'owner': 'alex'}]}])
     handover = _obligation(store, 'handover')
     assert handover['owner'] == 'me' and handover['status'] == 'open'
     assert _obligation(store, 'release-x')['status'] == 'candidate'

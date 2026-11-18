@@ -93,7 +93,7 @@ def ingest_activity(store, event: dict, config: dict | None = None, env=None) ->
     if not isinstance(config, dict) or not isinstance(config.get('repo_projects', {}), dict):
         raise ValueError('Hook config and repo_projects must be objects')
     identity = json.dumps([event['session_id'], event['turn_id'], event['event_id']], separators=(',', ':'))
-    source_id = 'local-activity:' + hashlib.sha256(identity.encode()).hexdigest()
+    source_id = 'local-activity:local:' + hashlib.sha256(identity.encode()).hexdigest()
     mapping = config.get('repo_projects', {}).get(event.get('repo'))
     if event.get('project_id'):
         mapping = {'id': event['project_id'], 'name': event['project_id']}
@@ -125,10 +125,10 @@ def ingest_activity(store, event: dict, config: dict | None = None, env=None) ->
     procedure = {key:event[key] for key in ('procedure_id','procedure_version','step_id') if event.get(key)}
     if procedure:
         lines += ['', 'Procedure reference (not executed or advanced): ' + json.dumps(procedure, sort_keys=True)]
-    obligations = [] if projects else [{'intent_key': f'map:{source_id}', 'title':'Review project mapping for local activity', 'status':'candidate', 'owner':None}]
+    obligations = [] if projects else [{'intent_key': f'{source_id}:map', 'title':'Review project mapping for local activity', 'status':'candidate', 'owner':None}]
     if event.get('learning'):
         lines += ['', 'Proposed correction learning — not an accepted rule:', json.dumps(event['learning'], ensure_ascii=False, sort_keys=True)]
-        obligations.append({'intent_key':f'learning:{source_id}', 'title':'Review proposed learning: ' + event['learning']['correction'][:120], 'status':'candidate', 'owner':None, 'project_id':projects[0]['id'] if len(projects) == 1 else None})
+        obligations.append({'intent_key':f'{source_id}:learning', 'title':'Review proposed learning: ' + event['learning']['correction'][:120], 'status':'candidate', 'owner':None, 'project_id':projects[0]['id'] if len(projects) == 1 else None})
     source = {'id':source_id, 'provider':'local-activity', 'title':event['summary'].strip().splitlines()[0][:160],
               'body':'\n'.join(lines), 'projects':projects, 'obligations':obligations,
               'url':event['evidence_urls'][0] if event['evidence_urls'] else None,
