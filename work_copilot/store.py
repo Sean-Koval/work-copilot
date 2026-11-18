@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from filelock import FileLock
 from .knowledge import ENVELOPE_VERSION, validate_envelope
+from . import schema
 from .rules import Rules
 
 
@@ -67,27 +68,12 @@ class Store:
         self.db.row_factory = sqlite3.Row
         self.db.execute('PRAGMA journal_mode=WAL')
         self.db.execute('PRAGMA foreign_keys=ON')
-        self.db.executescript('''
-        CREATE VIRTUAL TABLE IF NOT EXISTS source_search USING fts5(source_id UNINDEXED,title,body,project_terms);
-        CREATE TABLE IF NOT EXISTS sources(id TEXT PRIMARY KEY, revision TEXT NOT NULL, payload TEXT NOT NULL, connector TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS source_revisions(id TEXT NOT NULL,revision TEXT NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(id,revision));
-        CREATE TABLE IF NOT EXISTS source_mappings(source_id TEXT PRIMARY KEY,revision INTEGER NOT NULL,projects TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY,name TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS project_config(project_id TEXT PRIMARY KEY,aliases TEXT NOT NULL,rooms TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS source_projects(source_id TEXT NOT NULL,project_id TEXT NOT NULL,workstream TEXT NOT NULL DEFAULT '',PRIMARY KEY(source_id,project_id,workstream));
-        CREATE TABLE IF NOT EXISTS obligations(id TEXT PRIMARY KEY, canonical TEXT UNIQUE NOT NULL,payload TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS source_intents(source_id TEXT NOT NULL,candidate_key TEXT NOT NULL,obligation_id TEXT NOT NULL,PRIMARY KEY(source_id,candidate_key));
-        CREATE TABLE IF NOT EXISTS manual_evidence(obligation_id TEXT NOT NULL,source_id TEXT NOT NULL,PRIMARY KEY(obligation_id,source_id));
-        CREATE TABLE IF NOT EXISTS evidence(obligation_id TEXT NOT NULL,source_id TEXT NOT NULL,PRIMARY KEY(obligation_id,source_id));
-        CREATE TABLE IF NOT EXISTS drafts(id TEXT PRIMARY KEY,payload TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS connectors(name TEXT PRIMARY KEY,payload TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS local_metadata(key TEXT PRIMARY KEY,payload TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS plans(day TEXT PRIMARY KEY,payload TEXT NOT NULL);
-        ''')
-        # Serialize schema inspection and projection rebuild across UI/MCP startup.
+        # Ordered migrations, with a backup first when the database already holds data.
+        self.migration=schema.migrate(self.db,self.path)
+        # Backups hold captured text; keep none past the retention limit.
+        schema.prune_backups(self.path)
+        # Serialize projection rebuild across UI/MCP startup.
         self.db.execute('BEGIN IMMEDIATE')
-        if 'revision' not in {row['name'] for row in self.db.execute('PRAGMA table_info(project_config)')}:
-            self.db.execute('ALTER TABLE project_config ADD COLUMN revision INTEGER NOT NULL DEFAULT 1')
         # Rebuildable projection; migration also indexes pre-search databases.
         self.db.execute('DELETE FROM source_search')
         self._rebuild_project_projections(invalidate_drafts=False)
@@ -132,6 +118,66 @@ class Store:
     def close(self):
         with self._lock:
             self.db.close()
+
+    def export_jsonl(self, destination):
+        """Write all recorded state as JSONL (one consistent snapshot); restore with import_jsonl.
+
+        A read transaction: in WAL mode other processes keep writing meanwhile.
+        """
+        with self._lock:
+            self.db.execute('BEGIN')
+            try:
+                return schema.export_jsonl(self.db,destination,self.now().isoformat())
+            finally:
+                self.db.rollback()
+
+    @classmethod
+    def import_jsonl(cls, source, path, **options):
+        """Restore an export into a new database at ``path`` and open it.
+
+        Built beside the target, opened and checked there, and only then moved into place, so
+        a failed import leaves nothing behind and never touches an existing database.
+        """
+        path=Path(path).resolve()
+        path.parent.mkdir(parents=True,exist_ok=True)
+        staging=path.with_name(path.name+'.importing')
+        with FileLock(str(path)+'.init.lock',timeout=30,mode=0o600):
+            for existing in (path,*schema._sidecars(path)):
+                if existing.exists():
+                    raise ValueError(f'{existing} already exists; import restores into an empty data folder only')
+            for leftover in (staging,*schema._sidecars(staging)):
+                leftover.unlink(missing_ok=True)
+            try:
+                result=schema.import_jsonl(source,staging)
+                check=cls(staging,**options)
+                try:
+                    # Read every record back through the store, then discard any plan it anchors.
+                    check.db.execute('BEGIN')
+                    try:
+                        check.snapshot()
+                    finally:
+                        check.db.rollback()
+                    check.db.execute('PRAGMA journal_mode=DELETE')
+                finally:
+                    check.close()
+                try:
+                    staging.chmod(0o600)
+                except OSError:
+                    pass
+                if any(sidecar.exists() for sidecar in schema._sidecars(path)):
+                    raise ValueError('A database journal appeared beside the target during import; nothing was restored')
+                os.replace(staging,path)
+                # Report where the database now is, not the staging file it was built in.
+                result['path']=str(path)
+            except Exception as exc:
+                for leftover in (staging,*schema._sidecars(staging)):
+                    leftover.unlink(missing_ok=True)
+                if isinstance(exc,ValueError):
+                    raise
+                raise ValueError(f'Export holds records this Work Copilot cannot open ({type(exc).__name__}: {exc})') from exc
+            finally:
+                Path(str(staging)+'.init.lock').unlink(missing_ok=True)
+        return cls(path,**options),result
 
     def _rows(self, table):
         return [json.loads(row['payload']) for row in self.db.execute(f'SELECT payload FROM {table}')]
