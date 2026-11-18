@@ -26,7 +26,7 @@ Use fictional content and an isolated data directory first. Record the OS, Pytho
 ### 1. Install and restart
 
 - [ ] Follow [Getting started](GETTING_STARTED.md) on the target OS without undocumented setup.
-- [ ] Run `./run.sh smoke` and inspect its phase results. It uses temporary fictional data, not your real workspace, chosen agent, or company server.
+- [ ] Run `./run.sh smoke` (or `work-copilot smoke` for an installed copy) and inspect its phase results. It uses temporary fictional data, not your real workspace, chosen agent, or company server.
 - [ ] Start the dashboard, stop with Ctrl+C, and restart against the same private data directory.
 - [ ] Existing fictional projects/notes/obligations remain present without duplicates.
 - [ ] An unchanged normal launch does not require a new package installation.

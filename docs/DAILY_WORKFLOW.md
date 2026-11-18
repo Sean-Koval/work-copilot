@@ -104,4 +104,4 @@ Open the generated Markdown in Obsidian to inspect project context and source pa
 - **Source changed after a draft:** refresh and regenerate before copying.
 - **No expected results:** loosen lexical search filters, then inspect coverage and the selected vault. An absent result is not proof the event never happened.
 - **Auth error:** follow [OAuth MCP setup](SYMPHONY_MCP.md); a successful login alone does not prove catch-up completeness or ACL coverage.
-- **Local setup unclear:** run `./run.sh --data-dir /absolute/private/copilot --timezone America/New_York doctor --vault /absolute/path/to/work-vault`, replacing the example paths/timezone with those used by your running service. Diagnostics inspect local setup, not company authorization or end-to-end agent behavior.
+- **Local setup unclear:** run `./run.sh --data-dir /absolute/private/copilot --timezone America/New_York doctor --vault /absolute/path/to/work-vault`, replacing the example paths/timezone with those used by your running service (`work-copilot` in place of `./run.sh` for an installed copy). Diagnostics inspect local setup, not company authorization or end-to-end agent behavior.
