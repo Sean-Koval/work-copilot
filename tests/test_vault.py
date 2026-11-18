@@ -2,6 +2,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
+from work_copilot.ids import ask_kind
 from work_copilot.vault import capture_vault, export_projects, GENERATED_DIR
 
 
@@ -165,8 +166,15 @@ class InboxMetadataTests(VaultFixture):
         pasted = self.store.sources[receipt['source_ids'][0]]
         dropped = next(s for s in self.store.sources.values() if s['title'] == 'Dropped.md')
         self.assertEqual(pasted['projects'], dropped['projects'])
-        self.assertEqual(pasted['obligations'], dropped['obligations'])
-        self.assertTrue(Path(receipt['path']).read_text(encoding='utf-8').startswith('---\n'))
+        # A bare ask kind is an ask from each note, so only the source part of the key differs.
+        self.assertEqual([o['intent_key'] for o in pasted['obligations']], [pasted['id'] + ':release'])
+        self.assertEqual([o['intent_key'] for o in dropped['obligations']], [dropped['id'] + ':release'])
+        self.assertEqual([{**o, 'intent_key': ask_kind(o['intent_key'])} for o in pasted['obligations']],
+                         [{**o, 'intent_key': ask_kind(o['intent_key'])} for o in dropped['obligations']])
+        self.assertEqual(receipt['not_in_header'], [])
+        written = Path(receipt['path']).read_text(encoding='utf-8')
+        self.assertTrue(written.startswith('---\nid: '))
+        self.assertIn('```yaml\nproject_ids: ["atlas"]\n', written)
 
 class ExplicitCaptureTests(VaultFixture):
     def test_optional_project_selection_needs_no_frontmatter(self):

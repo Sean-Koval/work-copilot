@@ -38,7 +38,7 @@ class MCPTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             from work_copilot.store import Store
             store = Store(Path(directory) / 'copilot.db')
-            store.ingest([{'id':'example:message:1','revision':'1','provider':'example','title':'Fictional question','body':'Is staging ready?', 'projects':[{'id':'atlas','name':'Atlas'}], 'obligations':[{'intent_key':'staging','title':'Confirm staging','project_id':'atlas','owner':None}]}])
+            store.ingest([{'id':'example:message:1','revision':'1','provider':'example','title':'Fictional question','body':'Is staging ready?', 'projects':[{'id':'atlas','name':'Atlas'}], 'obligations':[{'intent_key':'example:message:1:staging','title':'Confirm staging','project_id':'atlas','owner':None}]}])
             store.close()
             asyncio.run(exercise(directory))
 
@@ -97,7 +97,7 @@ class MCPTests(unittest.TestCase):
                     self.assertEqual(packet['page']['total'],40)
                     self.assertEqual(packet['page']['next_cursor'],5)
                     self.assertNotIn('body',packet['obligations'][0])
-                    source=await session.call_tool('get_source',{'source_id':'fictional:big','max_chars':1000})
+                    source=await session.call_tool('get_source',{'source_id':'fixture:fictional:big','max_chars':1000})
                     detail=json.loads(source.content[0].text)
                     self.assertEqual(len(detail['body']),1000)
                     self.assertTrue(detail['truncated'])
@@ -105,7 +105,7 @@ class MCPTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             from work_copilot.store import Store
             store=Store(Path(directory)/'copilot.db')
-            store.ingest([{'id':'fictional:big','revision':'1','provider':'fixture','title':'Large fixture','body':'context '*20000,'projects':[{'id':'atlas','name':'Atlas'}],'obligations':[{'intent_key':f'q-{i}','title':f'Question {i}','owner':'me','project_id':'atlas'} for i in range(40)]}])
+            store.ingest([{'id':'fixture:fictional:big','revision':'1','provider':'fixture','title':'Large fixture','body':'context '*20000,'projects':[{'id':'atlas','name':'Atlas'}],'obligations':[{'intent_key':f'fixture:fictional:big:q-{i}','title':f'Question {i}','owner':'me','project_id':'atlas'} for i in range(40)]}])
             store.close()
             asyncio.run(exercise(directory))
 
@@ -125,7 +125,7 @@ class MCPTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             from work_copilot.store import Store
             store=Store(Path(directory)/'copilot.db')
-            store.ingest([{'id':'fixture:overdue','revision':'1','provider':'fixture','title':'Overdue fixture','body':'Fictional source','projects':[{'id':'atlas','name':'Atlas'}],'obligations':[{'intent_key':f'q-{i}','title':f'Action {i}','owner':'me','project_id':'atlas','due_at':'2020-01-01'} for i in range(900)]}])
+            store.ingest([{'id':'fixture:fictional:overdue','revision':'1','provider':'fixture','title':'Overdue fixture','body':'Fictional source','projects':[{'id':'atlas','name':'Atlas'}],'obligations':[{'intent_key':f'fixture:fictional:overdue:q-{i}','title':f'Action {i}','owner':'me','project_id':'atlas','due_at':'2020-01-01'} for i in range(900)]}])
             store.close();asyncio.run(exercise(directory))
 
     def test_source_identity_and_reply_evidence_continuation(self):
@@ -150,7 +150,7 @@ class MCPTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             from work_copilot.store import Store
             store=Store(Path(directory)/'copilot.db');store.create_project('atlas','Atlas')
-            long_id='source:'+('x'*350)
-            sources=[{'id':long_id if i==0 else f'source:{i}','revision':'revision-'+('y'*350),'provider':'fixture','title':str(i),'body':'IdentityToken' if i==0 else 'Evidence','projects':[],'obligations':[]} for i in range(12)]
+            long_id='fixture:fictional:'+('x'*350)
+            sources=[{'id':long_id if i==0 else f'fixture:fictional:{i}','revision':'revision-'+('y'*350),'provider':'fixture','title':str(i),'body':'IdentityToken' if i==0 else 'Evidence','projects':[],'obligations':[]} for i in range(12)]
             store.ingest(sources);store.track_obligation({'intent_key':'question','title':'Question','project_id':'atlas','evidence_ids':[s['id'] for s in sources]});store.close()
             asyncio.run(exercise(directory,long_id,[s['id'] for s in sources]))

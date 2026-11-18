@@ -59,11 +59,11 @@ For engineering replies, keep claims separate: **planned → implemented → mer
 Choose **Track waiting / action**:
 
 - Describe the distinct request.
-- Use a stable intent key, such as `atlas-workshop-transcript`.
+- Use a stable intent key: a lower-case ask kind, such as `atlas-workshop-transcript`, or `<source id>:<ask kind>` to join an ask a source already carries.
 - Choose project, owner, and state; leave uncertain ownership unresolved.
 - Set an optional follow-up time. Record a promised due date and mark an explicit commitment only when warranted. Name the waiting-on dependency if known. Add supporting context or source references where available.
 
-Reuse the same project/intent for the same request. Different questions in one room need distinct intents. For example, “build the skill,” “update the Jira ticket,” and “send the team a status answer” are separate obligations: completing code does not complete the ticket update or inform the team. The app deduplicates explicit keys, not arbitrary similar prose. Review pending/sent/answered state before asking again.
+Reuse the same intent key for the same request. Different questions in one room need distinct intents. For example, “build the skill,” “update the Jira ticket,” and “send the team a status answer” are separate obligations: completing code does not complete the ticket update or inform the team. The app deduplicates explicit keys, not arbitrary similar prose. Review pending/sent/answered state before asking again.
 
 ### Example: three projects, nine distinct obligations
 
