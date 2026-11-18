@@ -38,6 +38,8 @@ from pydantic import (
     field_validator,
 )
 
+from .join_key import TICKET, join_fields, neutralise
+
 ENVELOPE_VERSION = 1
 """``schema_version`` of the source envelope (ai-dlc ``ENVELOPE_VERSION``)."""
 RECORD_FORMAT_VERSION = 1
@@ -204,6 +206,20 @@ def parse_frontmatter(text: str) -> dict | None:
     return None
 
 
+def _join(source: dict) -> dict:
+    """The source's validated join key fields, or none (KAN-383)."""
+    try:
+        return join_fields(source.get('join') or {})
+    except (ValueError, AttributeError):
+        return {}
+
+
+def _ticket(source: dict) -> list[str]:
+    """The ticket to link with ``belongs_to``: only a Jira-style key, never an issue number."""
+    tracker = _join(source).get('tracker')
+    return [tracker] if tracker and TICKET.fullmatch(tracker) else []
+
+
 def build_record(source: dict, *, owner: str, scope: str, day: str, raw_resource: str,
                  raw_hash: str, exported_at: datetime, extra_sources=()) -> str:
     """Render one Source record (frontmatter and summary body) for a source."""
@@ -214,7 +230,9 @@ def build_record(source: dict, *, owner: str, scope: str, day: str, raw_resource
         if isinstance(target, str) and target and target not in projects:
             projects.append(target)
     stale = (exported_at + CANDIDATE_WINDOW).astimezone(timezone.utc)
-    excerpt = summary(envelope['body'])
+    # The excerpt is free text: quote any key line in it, so the only key a reader
+    # finds is the one written below from the validated join fields.
+    excerpt = neutralise(summary(envelope['body']))
     fields = {
         'id': record_id(envelope['id'], envelope['provider']),
         'type': 'source',
@@ -224,7 +242,7 @@ def build_record(source: dict, *, owner: str, scope: str, day: str, raw_resource
         'owner': owner,
         'sources': [{'id': envelope['id'], 'resource': raw_resource, 'hash': 'sha256:' + raw_hash},
                     *extra_sources],
-        'links': [{'type': 'belongs_to', 'target': target} for target in projects],
+        'links': [{'type': 'belongs_to', 'target': target} for target in [*projects, *(t for t in _ticket(source) if t not in projects)]],
         'title': envelope['title'],
         'stale_after': stale.isoformat().replace('+00:00', 'Z'),
         'schema_version': ENVELOPE_VERSION,
@@ -240,6 +258,10 @@ def build_record(source: dict, *, owner: str, scope: str, day: str, raw_resource
     body = [f"# {' '.join(envelope['title'].split())}", '']
     if excerpt:
         body += [excerpt, '']
+    session = _join(source).get('session_key')
+    if session:
+        # ai-dlc's readers find the join key on a line of its own (docs/design/session-join-key.md).
+        body += [f'Work-Session: {session}', '']
     body += [f'Raw payload: `{raw_resource}`. Inbox candidate until {stale.date().isoformat()}.', '']
     return render_frontmatter(fields) + '\n'.join(body)
 

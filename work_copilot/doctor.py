@@ -50,6 +50,23 @@ def _database_details(db):
     return integrity,connectors,projects
 
 
+def _backup_status(database_path):
+    from .schema import backups, BACKUP_MAX_AGE_DAYS
+    found=backups(database_path)
+    oldest=found[0].name.rsplit('-',1)[-1].removesuffix('.db') if found else None
+    return {'count':len(found),'oldest':oldest,'folder':str(Path(database_path).parent/'backups'),'note':f'Pre-migration copies of all captured text; removed after {BACKUP_MAX_AGE_DAYS} days.'}
+
+
+def _schema_status(user_version):
+    from .schema import SCHEMA_VERSION
+    if user_version>SCHEMA_VERSION:
+        return {'ok':False,'status':'newer_schema','schema_version':user_version,'supported_schema_version':SCHEMA_VERSION,'note':'This database was written by a newer Work Copilot; upgrade before opening it.'}
+    status={'schema_version':user_version,'supported_schema_version':SCHEMA_VERSION}
+    if user_version<SCHEMA_VERSION:
+        status['schema_note']='The next start migrates this database, after copying it to backups/.'
+    return status
+
+
 def _result(directory, database, connectors, projects, timezone_name, vault, config):
     checks={**_runtime_checks(),
         'database':database,
@@ -70,8 +87,10 @@ def _result(directory, database, connectors, projects, timezone_name, vault, con
             settings=load_config(config)
             state=next((c for c in connectors if c.get('name')==settings['name']),None)
             selected=settings.get('tool')
-            ready=bool(selected and selected in settings.get('allowed_read_tools',[]))
-            checks['connector']={'ok':bool(state and state.get('status')=='healthy'),'status':state.get('status') if state else 'auth_or_discovery_required','name':settings['name'],'allowed_read_tools':settings.get('allowed_read_tools',[]),'collection_configured':ready,'last_success':state.get('last_success') if state else None,'gap_since':state.get('gap_since') if state else None,'note':'Configuration inspected offline; remote schemas, capabilities and credential validity were not probed. '+('Read tool selected; verify its arguments and mapping with your administrator.' if ready else 'Run explicit connect --authorize when approved, then select a verified tool in allowed_read_tools and configure arguments/mapping before collection.')}
+            from .remote_mcp import capture_settings
+            capture=capture_settings(settings)
+            ready=bool(selected and selected in settings.get('allowed_read_tools',[]) and capture)
+            checks['connector']={'ok':bool(state and state.get('status')=='healthy'),'status':state.get('status') if state else 'auth_or_discovery_required','name':settings['name'],'allowed_read_tools':settings.get('allowed_read_tools',[]),'collection_configured':ready,'capture':{'rooms':capture['rooms'],'spaces':capture['spaces'],'retention_days':capture['retention_days']} if capture else {'rooms':[],'spaces':[],'retention_days':None,'note':'No rooms or spaces picked; collection is refused until capture.rooms or capture.spaces is set.'},'last_success':state.get('last_success') if state else None,'gap_since':state.get('gap_since') if state else None,'note':'Configuration inspected offline; remote schemas, capabilities and credential validity were not probed. '+('Read tool selected; verify its arguments and mapping with your administrator.' if ready else 'Run explicit connect --authorize when approved, then select a verified tool in allowed_read_tools and configure arguments/mapping before collection.')}
             checks['oauth_storage']=_storage_check(directory)
         except ValueError as exc:
             # load_config emits field-only validation errors, not input values.
@@ -135,9 +154,12 @@ def _diagnose_path(data_dir, vault, config, timezone_name, database_path):
                     db=sqlite3.connect(copied.as_uri()+'?mode=ro',uri=True)
                     try:
                         integrity,connectors,projects=_database_details(db)
+                        user_version=db.execute('PRAGMA user_version').fetchone()[0]
                     finally:
                         db.close()
                     database.update(ok=integrity=='ok',status='ready' if integrity=='ok' else 'corrupt',integrity=integrity,note='Read-only check of a private temporary DB/WAL snapshot; original files unchanged.')
+                    database.update(_schema_status(user_version))
+                    database['backups']=_backup_status(path)
     except (OSError,sqlite3.Error,ValueError,TypeError):
         database.update(ok=False,status='unreadable_or_invalid',note='Database is unreadable, incompatible or corrupt. Check permissions and restore a verified backup; doctor made no repairs.')
         connectors=[];projects=0
