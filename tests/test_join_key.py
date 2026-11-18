@@ -36,6 +36,8 @@ def read_keys(text):
 
 def export_one(store, root):
     root.mkdir()
+    # export needs a team repository's knowledge.toml, and fails closed without one (KAN-489)
+    (root / 'knowledge.toml').write_text('[format]\nversion = 1\n\n[transcripts]\ncustomers = []\n', encoding='utf-8')
     export_sources(store, root, owner='sean', now=NOW)
     record = next((root / 'inbox').rglob('*.md')).read_text(encoding='utf-8')
     front = parse_frontmatter(record)
