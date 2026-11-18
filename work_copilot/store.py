@@ -13,6 +13,7 @@ from uuid import uuid4
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from filelock import FileLock
+from .join_key import FIELDS as JOIN_FIELDS, join_fields, neutralise
 from .knowledge import ENVELOPE_VERSION, validate_envelope
 from . import schema
 from .rules import Rules
@@ -829,14 +830,22 @@ class Store:
             return results
 
     def track_obligation(self, payload):
-        """Create a local user-entered waiting/action record, never an external send."""
-        allowed={'intent_key','title','project_id','owner','status','waiting_on','follow_up_at','due_at','question_state','commitment','evidence_ids','body'}
+        """Create a local user-entered waiting/action record, never an external send.
+
+        ``tracker``, ``work_id`` and ``session_key`` are the ai-dlc session join key
+        (KAN-383); they are kept only on the call that creates the record. A repeat
+        call with the same ``intent_key`` returns the existing record (flagged for review
+        when it names another project, KAN-392), so a different tracker on the repeat is
+        ignored, not combined with the first.
+        """
+        allowed={'intent_key','title','project_id','owner','status','waiting_on','follow_up_at','due_at','question_state','commitment','evidence_ids','body',*JOIN_FIELDS}
         if not isinstance(payload,dict) or set(payload)-allowed or not all(isinstance(payload.get(k),str) and payload[k].strip() for k in ('intent_key','title')):
             raise ValueError('Structured obligation requires intent_key and title; unknown fields rejected')
         body=payload.get('body','')
         if not isinstance(body,str) or len(body)>100000:
             raise ValueError('Body must be text of at most 100000 characters')
-        candidate={k:v for k,v in payload.items() if k not in ('evidence_ids','body')}
+        join=join_fields(payload)
+        candidate={k:v for k,v in payload.items() if k not in ('evidence_ids','body',*JOIN_FIELDS)}
         candidate['intent_key']=tracked_intent_key(payload['intent_key'])
         candidate.setdefault('owner',self.rules.self_owner); candidate.setdefault('status','waiting')
         candidate['owner']=self.rules.owner(candidate['owner'])
@@ -867,11 +876,17 @@ class Store:
                 if candidate.get('project_id'):
                     current=self._flag_project_change(current,candidate['project_id'])
                 return current
-            source={'id':'local-user:local:obligation/'+_id(canonical),'revision':'1','provider':'local-user','title':'User-entered obligation: '+candidate['title'],'body':'Explicitly entered by the local user. '+candidate['title']+('\n\n'+body if body else ''),'projects':[project] if project else [],'obligations':[candidate]}
+            # Free text never carries a join key line: only the one written from ``join`` does.
+            session=('\n\nWork-Session: '+join['session_key']) if join else ''
+            source={'id':'local-user:local:obligation/'+_id(canonical),'revision':'1','provider':'local-user','title':'User-entered obligation: '+candidate['title'],'body':neutralise('Explicitly entered by the local user. '+candidate['title']+('\n\n'+body if body else ''))+session,'projects':[project] if project else [],'obligations':[candidate]}
+            if join:
+                source['join']=join
             self.ingest([source],connector='local-user')
             oid=self.db.execute('SELECT id FROM obligations WHERE canonical=?',(canonical,)).fetchone()[0]
             for sid in ids:
                 self.db.execute('INSERT OR IGNORE INTO manual_evidence VALUES(?,?)',(oid,sid))
+            if join:
+                ob=self._obligation(oid); ob.update(join); self._put_obligation(ob)
             return self._obligation(oid)
 
     def sync_review_queue(self, items, connector='knowledge-review', observed_at=None):
