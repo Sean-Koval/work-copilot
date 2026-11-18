@@ -14,6 +14,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
+from .join_key import join_fields, neutralise
+
 MAX_EVENT_BYTES = 64 * 1024
 MAX_QUEUE_EVENTS = 1000
 
@@ -53,6 +55,7 @@ def _validated(event: dict) -> dict:
         if any(not isinstance(v, str) or len(v) > 4000 for v in learning.values()):
             raise ValueError('Learning fields must be strings up to 4000 characters')
         learning = {key: learning[key] for key in ('scope','project_id','repo','correction','preferred_approach','conditions','session_ref','supersedes') if key in learning}
+        learning = {key: neutralise(value) for key, value in learning.items()}
         learning['status'] = 'proposed'
     observed = event.get('observed_at') or datetime.now(timezone.utc).isoformat()
     try:
@@ -61,18 +64,31 @@ def _validated(event: dict) -> dict:
             raise ValueError('timezone required')
     except (ValueError, AttributeError):
         raise ValueError('observed_at must be an ISO timestamp with timezone') from None
-    return {key: event.get(key) for key in ('session_id','turn_id','event_id','repo','project_id','summary','procedure_id','procedure_version','step_id')} | {
-        'outcomes': outcomes, 'evidence_urls': urls, 'observed_at': timestamp.isoformat(), 'learning': learning}
+    join = join_fields(event, session_id=event['session_id'])
+    # Free text never carries a join key line: only the one written from ``join`` does.
+    return {key: event.get(key) for key in ('session_id','turn_id','event_id','repo','project_id','procedure_id','procedure_version','step_id')} | {
+        'summary': neutralise(event['summary']), 'outcomes': [neutralise(claim) for claim in outcomes], 'evidence_urls': urls, 'observed_at': timestamp.isoformat(), 'learning': learning} | join
+
+
+def _with_session(event, env):
+    """The event with the session's join key filled in from ``env`` when it names none.
+
+    ``env`` never refuses the event: a malformed or disagreeing variable is skipped.
+    """
+    if env is None or not isinstance(event, dict):
+        return event
+    return {**event, **join_fields(event, env, session_id=event.get('session_id'))}
 
 
 def _guarded() -> bool:
     return os.environ.get('WORK_COPILOT_HOOK_ACTIVE', '').lower() in {'1','true','yes'}
 
 
-def ingest_activity(store, event: dict, config: dict | None = None) -> dict:
+def ingest_activity(store, event: dict, config: dict | None = None, env=None) -> dict:
+    """Record one receipt. ``env`` (the session's environment) fills an absent join key."""
     if _guarded():
         return {'skipped': 'recursion_guard'}
-    event = _validated(event)
+    event = _validated(_with_session(event, env))
     config = config or {}
     if not isinstance(config, dict) or not isinstance(config.get('repo_projects', {}), dict):
         raise ValueError('Hook config and repo_projects must be objects')
@@ -98,6 +114,14 @@ def ingest_activity(store, event: dict, config: dict | None = None) -> dict:
     lines += ['', *(f'Provided evidence link (not fetched): {url}' for url in event['evidence_urls'])]
     if authority:
         lines += ['', 'Configured authority roles (not validation): ' + json.dumps(authority, sort_keys=True)]
+    join = {key:event[key] for key in ('tracker','work_id','session_key') if event.get(key)}
+    # A repository label is free text too; quote any key line in it.
+    lines = [neutralise(line) for line in lines]
+    if join:
+        # ai-dlc's readers find the key on a line of its own (docs/design/session-join-key.md).
+        lines += ['', 'Work-Session: ' + join['session_key']]
+        if join.get('tracker'):
+            lines += ['Ticket (claimed, not verified): ' + join['tracker']]
     procedure = {key:event[key] for key in ('procedure_id','procedure_version','step_id') if event.get(key)}
     if procedure:
         lines += ['', 'Procedure reference (not executed or advanced): ' + json.dumps(procedure, sort_keys=True)]
@@ -110,6 +134,9 @@ def ingest_activity(store, event: dict, config: dict | None = None) -> dict:
               'url':event['evidence_urls'][0] if event['evidence_urls'] else None,
               'observed_at':event['observed_at'], 'verification':'claimed',
               'procedure':procedure, 'learning':event.get('learning'), 'activity': {k:event[k] for k in ('session_id','turn_id','event_id','repo')}, 'deleted':False}
+    if join:
+        # Only when present, so a receipt without a key keeps the revision it had before KAN-383.
+        source['join'] = join
     payload = {k:v for k,v in source.items() if k != 'observed_at'}
     source['revision'] = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
     result = store.ingest([source], connector='local-activity')
@@ -118,7 +145,7 @@ def ingest_activity(store, event: dict, config: dict | None = None) -> dict:
     # evidence and stopped before recording this separate non-network suggestion.
     store.request_refresh('Local activity claims need source verification', source_id=source_id)
     return {'source_id':source_id, 'revision':source['revision'], 'verification':'claimed',
-            'project_ids':[p['id'] for p in projects], 'refresh_requested':True, 'result':result}
+            'project_ids':[p['id'] for p in projects], 'refresh_requested':True, **join, 'result':result}
 
 
 def _queue(data_dir) -> Path:
@@ -152,10 +179,11 @@ def _atomic_json(path: Path, value: dict):
         temporary.unlink(missing_ok=True)
 
 
-def enqueue_activity(data_dir, event) -> dict:
+def enqueue_activity(data_dir, event, env=None) -> dict:
+    """Queue one event; the join key is taken from ``env`` now, since a later drain runs elsewhere."""
     if _guarded():
         return {'skipped':'recursion_guard'}
-    event = _validated(event)
+    event = _validated(_with_session(event, env))
     queue = _queue(data_dir)
     if len(list(queue.glob('*.event.json'))) >= MAX_QUEUE_EVENTS:
         raise ValueError('Activity queue is full (1000 events); drain or review errors first')
