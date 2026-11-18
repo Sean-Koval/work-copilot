@@ -7,6 +7,7 @@ import os
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import sqlite3
 import threading
+import time
 from contextlib import contextmanager
 from uuid import uuid4
 from datetime import datetime, timedelta, timezone
@@ -23,6 +24,115 @@ class ConflictError(ValueError):
 
 def _json(value):
     return json.dumps(value, sort_keys=True, ensure_ascii=False)
+
+
+# Keys only this store writes; never taken from a connector's item (KAN-390).
+_RESERVED_SOURCE_KEYS=('retained','redacted','captured_at')
+# Keys that differ between replays of one revision without changing its content.
+_OBSERVATION_KEYS=('observed_at','schema_version','captured_at')
+
+
+def _meaningful(source):
+    return {k:v for k,v in source.items() if k not in _OBSERVATION_KEYS}
+
+
+def _content_hash(source):
+    """sha256 of a source envelope without its observation times: what a redacted revision keeps (KAN-390)."""
+    return hashlib.sha256(_json(_meaningful(source)).encode('utf-8')).hexdigest()
+
+
+def _excerpt(body):
+    """The passage of a source body that an offline draft quotes."""
+    return (body or '').strip().replace('\n',' ')[:220]
+
+
+def _scrub_draft(draft, source_id, quotes, revisions=None):
+    """Remove ``source_id``'s body and quoted passages from one draft; returns (relevant, changed).
+
+    With ``revisions``, only evidence captured at those revisions loses its body: an older
+    revision was redacted while the current text is still kept.
+    """
+    if source_id not in draft.get('source_revisions',{}) and not any(e.get('id')==source_id for e in draft.get('evidence',[])):
+        return False, False
+    changed=False
+    for entry in draft.get('evidence',[]):
+        if entry.get('id')==source_id and entry.get('body') and (revisions is None or entry.get('revision') in revisions):
+            entry['body']=''; entry['text_removed']=True; changed=True
+    text=draft.get('text') or ''
+    for quote in quotes:
+        if quote and quote in text:
+            text=text.replace(quote,'[text removed: retention limit or forget]'); changed=True
+    draft.update(text=text,stale=True)
+    return True, changed
+
+
+def _clear_backup(path, retained, redacted, forgotten):
+    """Remove expired and forgotten source text from one backup file, in place (KAN-390)."""
+    db=sqlite3.connect(str(path))
+    try:
+        db.execute('PRAGMA secure_delete=ON')
+        tables={row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        gone=set(retained)|set(forgotten)
+        old_revisions={}
+        for sid,revision in redacted:
+            old_revisions.setdefault(sid,set()).add(revision)
+        quotes={}
+        # A backup taken before an edit holds, as its current row, a revision live has since
+        # replaced and redacted: that row's text goes too.
+        superseded=set()
+        if 'sources' in tables:
+            for sid,revision,payload in db.execute('SELECT id,revision,payload FROM sources'):
+                if sid in gone or (sid,revision) in redacted:
+                    quotes.setdefault(sid,[]).append(_excerpt(json.loads(payload).get('body')))
+                    if sid not in gone:
+                        superseded.add((sid,revision))
+        if 'source_revisions' in tables:
+            for sid,revision,payload in db.execute('SELECT id,revision,payload FROM source_revisions'):
+                if sid in gone or revision in old_revisions.get(sid,()):
+                    quotes.setdefault(sid,[]).append(_excerpt(json.loads(payload).get('body')))
+        with db:
+            if 'drafts' in tables:
+                for did,payload in db.execute('SELECT id,payload FROM drafts').fetchall():
+                    draft=json.loads(payload); changed=False
+                    for sid,found in quotes.items():
+                        changed|=_scrub_draft(draft,sid,found,None if sid in gone else old_revisions[sid])[0]
+                    if changed:
+                        db.execute('UPDATE drafts SET payload=? WHERE id=?',(_json(draft),did))
+            if 'sources' in tables:
+                for sid,mark in retained.items():
+                    db.execute("UPDATE sources SET payload=json_set(payload,'$.body','','$.retained',json(?)) WHERE id=?",(_json(mark),sid))
+            for sid,revision in superseded:
+                mark=json.loads(redacted[(sid,revision)])['redacted']
+                db.execute("UPDATE sources SET payload=json_set(payload,'$.body','','$.redacted',json(?)) WHERE id=? AND revision=?",(_json(mark),sid,revision))
+            if 'source_revisions' in tables:
+                for (sid,revision),pointer in redacted.items():
+                    db.execute('UPDATE source_revisions SET payload=? WHERE id=? AND revision=?',(pointer,sid,revision))
+            for sid in forgotten:
+                for table,column in (('sources','id'),('source_revisions','id'),('source_mappings','source_id'),('source_intents','source_id'),
+                                     ('evidence','source_id'),('manual_evidence','source_id'),('source_projects','source_id')):
+                    if table in tables:
+                        db.execute(f'DELETE FROM {table} WHERE {column}=?',(sid,))
+            if 'source_search' in tables:
+                for sid in set(retained)|set(forgotten)|{sid for sid,_ in superseded}:
+                    db.execute('DELETE FROM source_search WHERE source_id=?',(sid,))
+            if 'local_metadata' in tables:
+                # A restored copy rebuilds search and project links from what is left.
+                db.execute("DELETE FROM local_metadata WHERE key='projections'")
+        if 'source_search' in tables:
+            db.execute("INSERT INTO source_search(source_search) VALUES('optimize')")
+            db.commit()
+        db.execute('VACUUM')
+    finally:
+        db.close()
+
+
+# Schema backups (pre-upgrade, pre-rename) are rollback copies: expiry clears the expired
+# text inside them but never deletes one younger than this (KAN-390).
+BACKUP_MIN_KEEP_DAYS=7
+
+
+# Retention also runs when the store opens, at most this often (KAN-390).
+RETENTION_INTERVAL=timedelta(hours=1)
 
 
 def _instant(value):
@@ -67,12 +177,20 @@ class Store:
                 if hasattr(self,'db'):
                     self.db.close()
                 raise
+        # Text past a connector's retention limit expires even when collection has stopped
+        # or keeps failing (KAN-390). A failure is reported by apply_due_retention, never raised.
+        try:
+            self.retention_on_open=self.apply_due_retention()
+        except sqlite3.Error:
+            self.retention_on_open={'error':'database busy'}
 
     def _initialize_database(self):
         self.db = sqlite3.connect(str(self.path), check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.db.execute('PRAGMA journal_mode=WAL')
         self.db.execute('PRAGMA foreign_keys=ON')
+        # Deleted rows (expired bodies, forgotten sources) are overwritten, not left in free pages (KAN-390).
+        self.db.execute('PRAGMA secure_delete=ON')
         # Ordered migrations, with a backup first when the database already holds data.
         self.migration=schema.migrate(self.db,self.path)
         # Backups hold captured text; keep none past the retention limit.
@@ -307,7 +425,7 @@ class Store:
             for item in records:
                 if not isinstance(item,dict):
                     raise ValueError('Source envelope must be an object')
-                source=dict(item)
+                source={k:v for k,v in item.items() if k not in _RESERVED_SOURCE_KEYS}
                 source.setdefault('schema_version',ENVELOPE_VERSION)
                 source.setdefault('observed_at',self.now().isoformat())
                 # The shared Source contract (schema_version 1) covers id, revision,
@@ -319,17 +437,24 @@ class Store:
                 source.setdefault('url',None)
                 if not isinstance(source['projects'],list) or not isinstance(source['obligations'],list):
                     raise ValueError('Projects and obligations must be lists')
+                if self.db.execute('SELECT 1 FROM local_metadata WHERE key=?',('forgotten:'+source['id'],)).fetchone():
+                    # The user asked to forget this source; a later collection does not copy it back.
+                    result['forgotten']=result.get('forgotten',0)+1
+                    continue
                 old=self._source(source['id'])
                 prior=self.db.execute('SELECT payload FROM source_revisions WHERE id=? AND revision=?',(source['id'],source['revision'])).fetchone()
                 if prior:
                     # Observation time may differ on replay; content cannot.
                     # Payloads stored before schema_version existed are version 1.
-                    meaningful=lambda value: {k:v for k,v in value.items() if k not in ('observed_at','schema_version')}
-                    if meaningful(json.loads(prior[0])) != meaningful(source):
+                    # A redacted revision keeps only the hash of its content (KAN-390).
+                    stored=json.loads(prior[0])
+                    if (stored['redacted']['content_sha256']!=_content_hash(source)) if 'redacted' in stored else _meaningful(stored) != _meaningful(source):
                         raise ValueError('Source revision collision: payload changed without a new revision')
                     # Seen historical revisions are replay, not newer evidence.
                     result['unchanged']+=1
                     continue
+                # When this copy arrived, so retention can't be put off by a far-future observed_at.
+                source['captured_at']=self.now().isoformat()
                 if old and _instant(source['observed_at']) < _instant(old['observed_at']):
                     self.db.execute('INSERT INTO source_revisions VALUES(?,?,?)',(source['id'],source['revision'],_json(source)))
                     result['unchanged']+=1
@@ -572,8 +697,10 @@ class Store:
             else:
                 lines=[]
                 for index,source in enumerate(evidence[:2],1):
-                    excerpt=source['body'].strip().replace('\n',' ')[:220]
-                    lines.append(f'Observed source [{index}] says: “{excerpt}”')
+                    if source.get('retained'):
+                        lines.append(f'Observed source [{index}]: its text expired under the retention limit; open the link to read it.')
+                        continue
+                    lines.append(f'Observed source [{index}] says: “{_excerpt(source["body"])}”')
                 if not evidence:
                     lines.append('I do not have current evidence to give a reliable status yet.')
                 lines.extend(self.rules.notes(ob))
@@ -829,6 +956,170 @@ class Store:
         for source in self.list_sources():
             self._project_source(source)
         self.db.execute('INSERT INTO local_metadata VALUES(?,?) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload',('projections',_json({'version':PROJECTION_VERSION})))
+
+    def set_retention(self, connector, days):
+        """Record how long ``connector``'s text is kept, so retention also runs on open (KAN-390)."""
+        if type(days) is not int or days<1:
+            raise ValueError('retention_days must be a positive integer')
+        with self._transaction():
+            value=self._connector(connector)
+            if value.get('retention_days')!=days:
+                value['retention_days']=days
+                self._put_connector(value)
+
+    def has_source(self, source_id):
+        with self._lock:
+            return self.db.execute('SELECT 1 FROM sources WHERE id=?',(source_id,)).fetchone() is not None
+
+    def apply_due_retention(self, force=False):
+        """Run retention for each connector with a limit, at most once per RETENTION_INTERVAL.
+
+        Called when the store opens, so text expires even when collection stops or fails.
+        A failure here never stops the store from opening; it is reported instead.
+        """
+        report={}
+        for connector in self._rows('connectors'):
+            days=connector.get('retention_days')
+            if type(days) is not int or days<1:
+                continue
+            last=self.db.execute('SELECT payload FROM local_metadata WHERE key=?',('retention-run:'+connector['name'],)).fetchone()
+            if not force and last and self.now()-_instant(json.loads(last[0])['at'])<RETENTION_INTERVAL:
+                continue
+            try:
+                report[connector['name']]=self.apply_retention(connector['name'],days)
+            except (sqlite3.Error,OSError,ValueError) as exc:
+                report[connector['name']]={'error':type(exc).__name__}
+        return report
+
+    def apply_retention(self, connector, days):
+        """Keep captured text from ``connector`` for ``days`` only (KAN-390).
+
+        A source captured or observed more than ``days`` ago, or deleted upstream, keeps a
+        pointer: its id, link, title, projects and the sha256 of its body, which is removed.
+        Every older revision keeps only the hash of its content, so a replay is still
+        recognized. Drafts lose the expired text they quoted. Obligations (their titles) and
+        evidence links stay. The same text is cleared inside schema backups, which are kept as
+        rollback copies under the usual backup cleanup (see _scrub_backups).
+        """
+        if type(days) is not int or days<1:
+            raise ValueError('retention_days must be a positive integer')
+        now=self.now(); cutoff=now-timedelta(days=days)
+        expired=redacted=scrubbed=0
+        with self._transaction():
+            for sid,payload in self.db.execute('SELECT id,payload FROM sources WHERE connector=?',(connector,)).fetchall():
+                source=json.loads(payload)
+                age=min(_instant(source['observed_at']),_instant(source.get('captured_at') or source['observed_at']))
+                gone=bool(source.get('deleted')) or age<cutoff
+                for revision,stored in self.db.execute('SELECT revision,payload FROM source_revisions WHERE id=?',(sid,)).fetchall():
+                    stored=json.loads(stored)
+                    if 'redacted' in stored or (revision==source['revision'] and not gone):
+                        continue
+                    pointer={'id':sid,'revision':revision,'redacted':{'content_sha256':_content_hash(stored),'at':now.isoformat()}}
+                    self.db.execute('UPDATE source_revisions SET payload=? WHERE id=? AND revision=?',(_json(pointer),sid,revision))
+                    scrubbed+=self._scrub_drafts(sid,[stored.get('body')],None if gone else {revision})
+                    redacted+=1
+                if gone and not source.get('retained'):
+                    body=source.get('body') or ''
+                    source.update(body='',retained={'expired_at':now.isoformat(),'retention_days':days,'body_sha256':hashlib.sha256(body.encode('utf-8')).hexdigest()})
+                    self.db.execute('UPDATE sources SET payload=? WHERE id=?',(_json(source),sid))
+                    self._project_source(self._source(sid))
+                    scrubbed+=self._scrub_drafts(sid,[body])
+                    expired+=1
+            self.db.execute('INSERT INTO local_metadata VALUES(?,?) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload',('retention-run:'+connector,_json({'at':now.isoformat(),'days':days})))
+        wal_cleared=self._compact(optimize=expired>0) if (expired or redacted or scrubbed) else True
+        pending=self.db.execute("SELECT 1 FROM local_metadata WHERE key='backups-pending'").fetchone()
+        backups=self._scrub_backups() if (expired or redacted or pending) else {'backups_cleared':0,'backups_removed':0,'backups_left':0}
+        return {'expired_bodies':expired,'redacted_revisions':redacted,'drafts_scrubbed':scrubbed,'wal_cleared':wal_cleared,**backups}
+
+    def _scrub_drafts(self, source_id, bodies, revisions=None):
+        """Remove a source's text from every draft that quotes it; the draft is marked stale."""
+        quotes=[_excerpt(body) for body in bodies if body]
+        count=0
+        for draft in self._rows('drafts'):
+            was_stale=draft.get('stale')
+            relevant,changed=_scrub_draft(draft,source_id,quotes,revisions)
+            if relevant and (changed or not was_stale):
+                self.db.execute('UPDATE drafts SET payload=? WHERE id=?',(_json(draft),draft['id']))
+                count+=changed
+        return count
+
+    def _scrub_backups(self):
+        """Clear expired and forgotten text inside every schema backup, keeping the backup.
+
+        A backup is a rollback copy taken before an upgrade or a vault-id rename, so it is not
+        deleted here: the expired bodies, older revisions and forgotten sources this database
+        no longer holds are removed from it, then it is vacuumed so no free page keeps them.
+        Works by table name only, so an older schema's backup is never migrated. A backup that
+        can't be cleared (held open, damaged) is deleted only when it is at least
+        BACKUP_MIN_KEEP_DAYS old; otherwise it is reported in ``backups_left``.
+        """
+        with self._lock:
+            retained={row[0]:json.loads(row[1]) for row in self.db.execute("SELECT id,json_extract(payload,'$.retained') FROM sources WHERE json_extract(payload,'$.retained') IS NOT NULL")}
+            redacted={(row[0],row[1]):row[2] for row in self.db.execute("SELECT id,revision,payload FROM source_revisions WHERE json_extract(payload,'$.redacted') IS NOT NULL")}
+            forgotten={row[0][len('forgotten:'):] for row in self.db.execute("SELECT key FROM local_metadata WHERE key LIKE 'forgotten:%'")}
+        report={'backups_cleared':0,'backups_removed':0,'backups_left':0}
+        if not (retained or redacted or forgotten):
+            return report
+        now=self.now()
+        for path in schema.backups(self.path):
+            try:
+                _clear_backup(path,retained,redacted,forgotten)
+                report['backups_cleared']+=1
+            except (sqlite3.Error,OSError):
+                try:
+                    taken=datetime.strptime(path.name.rsplit('-',1)[-1],'%Y%m%dT%H%M%S%fZ.db').replace(tzinfo=timezone.utc)
+                    if (now-taken).days>=BACKUP_MIN_KEEP_DAYS:
+                        path.unlink(missing_ok=True); report['backups_removed']+=1
+                        continue
+                except (ValueError,OSError):
+                    pass
+                report['backups_left']+=1
+        # A backup left holding text is tried again on the next retention run, even one that
+        # expires nothing new (retention also runs on open, hourly).
+        with self._transaction():
+            if report['backups_left']:
+                self.db.execute("INSERT INTO local_metadata VALUES('backups-pending',?) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload",(_json({'left':report['backups_left']}),))
+            else:
+                self.db.execute("DELETE FROM local_metadata WHERE key='backups-pending'")
+        return report
+
+    def forget(self, source_id):
+        """Remove one source's text from this database: revisions, search, mappings, evidence
+        links and the passages drafts quote, and the same from every schema backup.
+        Obligations created from it keep their titles. Copies outside the database (JSONL
+        exports, the generated wiki, knowledge records) are not touched. A later collection
+        skips the source (KAN-390)."""
+        if not isinstance(source_id,str) or not source_id:
+            raise ValueError('Give the id of the source to forget')
+        with self._transaction():
+            if not (self.db.execute('SELECT 1 FROM sources WHERE id=?',(source_id,)).fetchone() or self.db.execute('SELECT 1 FROM source_revisions WHERE id=?',(source_id,)).fetchone()):
+                raise KeyError(source_id)
+            bodies=[json.loads(row[0]).get('body') for row in self.db.execute('SELECT payload FROM source_revisions WHERE id=?',(source_id,))]
+            current=self.db.execute('SELECT payload FROM sources WHERE id=?',(source_id,)).fetchone()
+            if current:
+                bodies.append(json.loads(current[0]).get('body'))
+            stale=sum(1 for draft in self._rows('drafts') if source_id in draft.get('source_revisions',{}) or any(e.get('id')==source_id for e in draft.get('evidence',[])))
+            self._scrub_drafts(source_id,bodies)
+            for table,column in (('sources','id'),('source_revisions','id'),('source_mappings','source_id'),('source_intents','source_id'),
+                                 ('evidence','source_id'),('manual_evidence','source_id'),('source_projects','source_id'),('source_search','source_id')):
+                self.db.execute(f'DELETE FROM {table} WHERE {column}=?',(source_id,))
+            self.db.execute('INSERT INTO local_metadata VALUES(?,?) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload',('forgotten:'+source_id,_json({'at':self.now().isoformat()})))
+        wal_cleared=self._compact(optimize=True)
+        return {'forgotten':source_id,'stale_drafts':stale,'wal_cleared':wal_cleared,**self._scrub_backups()}
+
+    def _compact(self, optimize=False):
+        """Drop removed text from the write-ahead log, and from the search index's segments
+        when ``optimize``. Returns whether the log was emptied: another reader can hold it."""
+        with self._lock:
+            if optimize:
+                self.db.execute("INSERT INTO source_search(source_search) VALUES('optimize')")
+            self.db.commit()
+            for attempt in range(5):
+                busy=self.db.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()[0]
+                if not busy:
+                    return True
+                time.sleep(0.05*(attempt+1))
+            return False
 
     def rebuild_projections(self):
         """Explicit repair: rebuild the search index and project links. Recorded state is untouched."""

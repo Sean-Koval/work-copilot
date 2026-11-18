@@ -93,7 +93,7 @@ Doctor inspects local readiness; it does not authorize or contact a server. For 
 
 The database records its schema version. When a new Work Copilot changes the schema, the first start migrates it in ordered steps, after copying the old database to `backups/` in your data folder. A database from a newer Work Copilot is refused, not opened. `doctor` shows the schema version and the backups.
 
-A backup holds all captured text, so the five newest are kept and any older than 30 days is deleted on the next start.
+A backup holds captured text, so the five newest are kept and any older than 30 days is deleted on the next start. Text that expires or that you `forget` is cleared inside each backup too.
 
 Search and project links are kept current as records arrive, so a normal start does not rebuild them. If search ever looks wrong, `doctor --repair` rebuilds them from the recorded state; it changes nothing else.
 
