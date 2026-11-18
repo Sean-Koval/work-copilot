@@ -11,7 +11,9 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field
 
-ObligationStatus = Literal['candidate', 'open', 'waiting', 'resolved', 'dismissed']
+from .knowledge import OBLIGATION_STATUSES
+
+ObligationStatus = Literal[OBLIGATION_STATUSES]  # the record contract's obligation statuses (KAN-504)
 QuestionState = Literal['pending', 'sent', 'answered']
 
 

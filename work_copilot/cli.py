@@ -92,7 +92,7 @@ def _run():
             p.add_argument('--to',type=Path,default=os.environ.get('WORK_COPILOT_KNOWLEDGE_REPO'),help='Local knowledge repository; Source records go to its inbox/. Default: WORK_COPILOT_KNOWLEDGE_REPO')
             p.add_argument('--since',help='Export sources observed at or after this ISO timestamp with timezone')
             p.add_argument('--owner',default=os.environ.get('WORK_COPILOT_KNOWLEDGE_OWNER'),help='Record owner. Default: WORK_COPILOT_KNOWLEDGE_OWNER')
-            p.add_argument('--scope',default='personal',choices=['personal','project','team'])
+            p.add_argument('--scope',default='personal',choices=['personal','project','team'])  # work_copilot.knowledge.SCOPES; kept literal so hooks never import pydantic
         elif name=='review-queue':
             p.add_argument('--repo',type=Path,default=os.environ.get('WORK_COPILOT_KNOWLEDGE_REPO'),help='Local clone of the knowledge repository (read only). Default: WORK_COPILOT_KNOWLEDGE_REPO')
             _review_options(p)

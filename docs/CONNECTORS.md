@@ -42,7 +42,7 @@ The app exports only to `Work Copilot Generated/` inside the selected destinatio
 
 JSON imports are a list of the following objects. A live adapter must map its **verified** schema into these objects; a provider name does not establish API support.
 
-The envelope is versioned: `schema_version` is `1`, and a missing value is read as `1`. `Store.ingest` validates `id`, `revision`, `provider`, `title`, `body`, `observed_at`, `obligations` and `url` against the shared Source contract (ai-dlc `contracts/knowledge-record.schema.json`) and rejects any other version. The other fields below are Work Copilot extensions and are never exported.
+The envelope is versioned: `schema_version` is `1`, and a missing value is read as `1`. `Store.ingest` validates `id`, `revision`, `provider`, `title`, `body`, `observed_at`, `obligations` and `url` against the shared Source contract (ai-dlc `contracts/knowledge-record.schema.json`) and rejects any other version. The other fields below are Work Copilot extensions and are never exported. The tests keep a copy of that schema with ai-dlc's `contracts/knowledge-record.versions.toml`: the copy must hash to the published hash of the format version it claims, and the scope and obligation-status values Work Copilot accepts must match its enums.
 
 ```json
 [
