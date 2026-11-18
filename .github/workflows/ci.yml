@@ -41,6 +41,35 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: ./run.ps1 smoke
+      - name: Install the built wheel outside the checkout and smoke it
+        # The coworker route (KAN-397): a non-editable install with no clone. Catches missing package data.
+        shell: pwsh
+        run: |
+          $wheels = Join-Path $env:RUNNER_TEMP 'wheels'
+          $venv = Join-Path $env:RUNNER_TEMP 'wheel-venv'
+          python -m pip wheel . --no-deps -w $wheels
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m venv $venv
+          $bin = if ($IsWindows) { Join-Path $venv 'Scripts' } else { Join-Path $venv 'bin' }
+          $ext = if ($IsWindows) { '.exe' } else { '' }
+          $py = Join-Path $bin "python$ext"
+          $cli = Join-Path $bin "work-copilot$ext"
+          # No constraints: uv tool install and pipx take the newest compatible dependencies, so test those.
+          & $py -m pip install (Get-ChildItem $wheels -Filter *.whl).FullName
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Set-Location $env:RUNNER_TEMP
+          & $cli --help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $cli smoke
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # The real OS's default data folder, not a patched sys.platform.
+          $base = if ($env:XDG_DATA_HOME) { $env:XDG_DATA_HOME } elseif ($IsWindows) { $env:LOCALAPPDATA } elseif ($IsMacOS) { Join-Path $HOME 'Library/Application Support' } else { Join-Path $HOME '.local/share' }
+          $expected = [IO.Path]::GetFullPath((Join-Path $base 'work-copilot'))
+          $init = & $cli init | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ([IO.Path]::GetFullPath($init.data_dir) -ne $expected) { Write-Error "data_dir $($init.data_dir), expected $expected"; exit 1 }
+          & $py -c "import pathlib, work_copilot; p = pathlib.Path(work_copilot.__file__).parent; assert 'site-packages' in p.parts, p; assert (p / 'static' / 'index.html').is_file()"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   oauth-keychain:
     # OAuth tokens live only in the OS keychain (KAN-461). macOS and Windows use the real Keychain and
