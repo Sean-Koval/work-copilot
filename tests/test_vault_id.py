@@ -361,3 +361,29 @@ def test_text_forgotten_after_the_rename_is_cleared_from_the_backup_taken_before
     # The backup still names the note by its old id; the alias recorded at the rename finds it.
     assert b'Ship Thursday' not in backup.read_bytes()
     assert backup.exists()
+
+
+def test_backups_from_before_two_renames_are_both_cleared(setup, monkeypatch):
+    _, root, store = setup
+    _legacy_capture(monkeypatch, store, root)
+    first = capture_vault(store, root)
+    (root / VAULT_ID_FILE).unlink()
+    second = capture_vault(store, root)
+    assert second['migrated_note_ids'] == 2
+    backups = [Path(first['backup_before_rename']), Path(second['backup_before_rename'])]
+    assert all(b'Ship Thursday' in backup.read_bytes() for backup in backups)
+    store.forget(f"vault:{second['vault_id']}:Meetings/release.md")
+    # The first backup names the path-hash ids; the alias chain leads back to them.
+    assert all(b'Ship Thursday' not in backup.read_bytes() for backup in backups)
+
+
+def test_a_vault_whose_notes_were_all_forgotten_still_records_its_alias(setup, monkeypatch):
+    _, root, store = setup
+    legacy = _legacy_capture(monkeypatch, store, root)
+    store.forget(f'vault:{legacy}:loose.md')
+    store.forget(f'vault:{legacy}:Meetings/release.md')
+    report = capture_vault(store, root)
+    assert store.list_sources() == []
+    keys = {row[0] for row in store.db.execute("SELECT key FROM local_metadata")}
+    assert f'vault-alias:{legacy}' in keys
+    assert f"forgotten:vault:{report['vault_id']}:loose.md" in keys

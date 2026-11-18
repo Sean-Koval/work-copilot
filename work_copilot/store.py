@@ -1008,9 +1008,11 @@ class Store:
                     olds.append(previous)
                 elif paths:
                     unclaimed=previous
-            migrated=0; renamed=[]
+            migrated=0; renamed=[]; touched=[]
             for old in olds:
                 count=self._rename_vault_namespace(old,vault_id)
+                if count is not None:
+                    touched.append(old)
                 if count:
                     migrated+=count; renamed.append(old)
             if migrated:
@@ -1020,9 +1022,13 @@ class Store:
             for old in renamed:
                 if re.fullmatch(r'[0-9a-f]{32}',old):
                     self.db.execute('DELETE FROM local_metadata WHERE key=?',('vault-root:'+old,))
+            for old in touched:
                 # Backups taken before this rename hold the old ids: remember the alias so text
                 # that expires or is forgotten later is still cleared from them (KAN-390).
-                self.db.execute('INSERT INTO local_metadata VALUES(?,?) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload',('vault-alias:'+old,_json({'new':vault_id})))
+                # Also when only forgotten notes' markers moved, for a backup left uncleared.
+                targets=self._metadata('vault-alias:'+old,{}).get('new',[])
+                targets=[targets] if isinstance(targets,str) else targets
+                self.db.execute('INSERT INTO local_metadata VALUES(?,?) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload',('vault-alias:'+old,_json({'new':list(dict.fromkeys(targets+[vault_id]))})))
             if renamed:
                 # Inbox note headers still carry the old ids until the vault rewrites them.
                 pending=self._metadata('vault-headers:'+vault_id,{}).get('old',[])
@@ -1075,12 +1081,12 @@ class Store:
         Only whole id values change: columns, JSON values and JSON keys outside free text.
         A renamed row whose key already exists under the new name is dropped, keeping the
         newer row; a dropped obligation's links move to the one kept. Returns the number of
-        notes renamed.
+        notes renamed, or None when nothing names the old namespace.
         """
         low,high='vault:'+old+':','vault:'+old+';'
         count=self.db.execute('SELECT count(*) FROM sources WHERE id>=? AND id<?',(low,high)).fetchone()[0]
         if not count and not self.db.execute('SELECT 1 FROM connectors WHERE name=?',('vault:'+old,)).fetchone():
-            return 0
+            return None
         pattern=re.compile(r'^((?:[a-z][a-z0-9-]*:)?)vault:'+old+r'(?=:|$)')
         def rename_text(value):
             return pattern.sub(lambda m:m.group(1)+'vault:'+new,value,count=1)
@@ -1234,15 +1240,27 @@ class Store:
             retained={row[0]:json.loads(row[1]) for row in self.db.execute("SELECT id,json_extract(payload,'$.retained') FROM sources WHERE json_extract(payload,'$.retained') IS NOT NULL")}
             redacted={(row[0],row[1]):row[2] for row in self.db.execute("SELECT id,revision,payload FROM source_revisions WHERE json_extract(payload,'$.redacted') IS NOT NULL")}
             forgotten={row[0][len('forgotten:'):] for row in self.db.execute("SELECT key FROM local_metadata WHERE key LIKE 'forgotten:%'")}
-            aliases={}
+            older={}
             for key,payload in self.db.execute("SELECT key,payload FROM local_metadata WHERE key LIKE 'vault-alias:%'"):
-                aliases.setdefault('vault:'+json.loads(payload)['new']+':',[]).append('vault:'+key[len('vault-alias:'):]+':')
-        if aliases:
-            # A backup taken before a vault-id rename (KAN-391) still names the old ids.
+                targets=json.loads(payload)['new']
+                for new in ([targets] if isinstance(targets,str) else targets):
+                    older.setdefault(new,set()).add(key[len('vault-alias:'):])
+        if older:
+            # A backup taken before a vault-id rename (KAN-391) still names the old ids, and a
+            # backup taken before an earlier rename names the ids before that: follow the chain.
+            def ancestors(namespace):
+                seen=set(); todo=[namespace]
+                while todo:
+                    for old in older.get(todo.pop(),()):
+                        if old not in seen and old!=namespace:
+                            seen.add(old); todo.append(old)
+                return seen
+            chains={new:ancestors(new) for new in older}
             def also(source_id):
-                for prefix,olds in aliases.items():
-                    if source_id.startswith(prefix):
-                        yield from (old+source_id[len(prefix):] for old in olds)
+                if source_id.startswith('vault:'):
+                    namespace,_,rest=source_id[len('vault:'):].partition(':')
+                    if rest:
+                        yield from ('vault:'+old+':'+rest for old in chains.get(namespace,()))
             retained={**retained,**{alias:value for sid,value in retained.items() for alias in also(sid)}}
             redacted={**redacted,**{(alias,rev):_json({**json.loads(value),'id':alias}) for (sid,rev),value in redacted.items() for alias in also(sid)}}
             forgotten=forgotten|{alias for sid in forgotten for alias in also(sid)}
