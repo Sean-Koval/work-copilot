@@ -119,6 +119,14 @@ def _collect(store, knowledge, github, review='assigned', batch_authors=()):
                                 review=review, batch_authors=batch_authors)
 
 
+# Each queue item is a source knowledge-review:local:<item key> and its ask <source id>:review.
+SOURCE = 'knowledge-review:local:'
+
+
+def _key(item):
+    return f'{SOURCE}{item}:review'
+
+
 def _queue(store):
     return {o['intent_key']: o for o in store.snapshot()['review_queue']}
 
@@ -128,20 +136,20 @@ def test_two_prs_an_overdue_record_and_an_old_source_make_four_obligations(store
     assert result['open'] == 4 and result['external_writes'] is False
     queue = _queue(store)
     assert sorted(queue) == sorted([
-        f'review:pr:{REPO}#1', f'review:pr:{REPO}#2',
-        'review:record:team/decisions/DEC-0001.md', 'review:source:inbox/zoom-old--aa.md'])
+        _key(f'pr:{REPO}#1'), _key(f'pr:{REPO}#2'),
+        _key('record:team/decisions/DEC-0001.md'), _key('source:inbox/zoom-old--aa.md')])
     for item in queue.values():
         assert item['kind'] == 'review' and item['owner'] == 'me' and item['status'] == 'open'
-    pr = queue[f'review:pr:{REPO}#1']
+    pr = queue[_key(f'pr:{REPO}#1')]
     assert pr['age_hours'] == 50.0
     assert pr['due_at'] == (NOW - timedelta(hours=2)).isoformat()
     assert pr['evidence'][0]['url'] == f'https://github.com/{REPO}/pull/1'
-    assert queue['review:source:inbox/zoom-old--aa.md']['age_hours'] == 27 * 24
-    assert queue['review:record:team/decisions/DEC-0001.md']['path'] == 'team/decisions/DEC-0001.md'
+    assert queue[_key('source:inbox/zoom-old--aa.md')]['age_hours'] == 27 * 24
+    assert queue[_key('record:team/decisions/DEC-0001.md')]['path'] == 'team/decisions/DEC-0001.md'
     state = store.snapshot()
     # Shown in "Needs you" (owned and open), not in the candidate review page.
     assert all(o['kind'] != 'review' for o in state['review'])
-    assert state['review_queue'][0]['intent_key'] == 'review:source:inbox/zoom-old--aa.md'  # oldest first
+    assert state['review_queue'][0]['intent_key'] == _key('source:inbox/zoom-old--aa.md')  # oldest first
 
 
 def test_closing_a_pr_resolves_it_on_the_next_collect_and_reopening_restores_it(store, knowledge):
@@ -152,7 +160,7 @@ def test_closing_a_pr_resolves_it_on_the_next_collect_and_reopening_restores_it(
     result = _collect(store, knowledge, github)
     assert result['open'] == 3 and len(result['resolved']) == 1
     resolved = [o for o in store.snapshot()['obligations'] if o['status'] == 'resolved']
-    assert [o['intent_key'] for o in resolved] == [f'review:pr:{REPO}#1']
+    assert [o['intent_key'] for o in resolved] == [_key(f'pr:{REPO}#1')]
     assert len(_queue(store)) == 3
     github.pulls.append(_pull(1, reviewers=[ME], hours=50))
     result = _collect(store, knowledge, github)
@@ -230,7 +238,7 @@ def test_without_github_only_local_items_are_collected(store, knowledge):
 
 def test_mcp_attention_exposes_kind_link_and_age(store, knowledge):
     _collect(store, knowledge, FakeGitHub())
-    pr = _queue(store)[f'review:pr:{REPO}#1']
+    pr = _queue(store)[_key(f'pr:{REPO}#1')]
     brief = _brief_obligation(pr)
     assert brief['kind'] == 'review' and brief['review_kind'] == 'pull_request'
     assert brief['url'].endswith('/pull/1') and brief['age_hours'] == 50.0
@@ -247,8 +255,8 @@ def test_personal_repo_review_all_lists_every_open_records_pr(store, knowledge):
     github.pulls.append(_pull(5, author=ME))                      # the batch, under the owner's own account
     github.pulls.append({**_pull(6), 'draft': True})               # a labelled draft that changes no records
     result = _collect(store, knowledge, github, review='all')
-    prs = sorted(k for k in _queue(store) if k.startswith('review:pr:'))
-    assert prs == [f'review:pr:{REPO}#{n}' for n in (1, 2, 3, 5)]
+    prs = sorted(k for k in _queue(store) if k.startswith(SOURCE + 'pr:'))
+    assert prs == [_key(f'pr:{REPO}#{n}') for n in (1, 2, 3, 5)]
     assert result['open'] == 6
     # Labelled non-drafts need no file read when every records PR counts.
     assert [c.split('?')[0] for c in github.calls if '/files' in c] == [f'repos/{REPO}/pulls/{n}/files' for n in (4, 6)]
@@ -260,7 +268,7 @@ def test_draft_prs_that_change_records_are_listed_with_the_clock_from_created_at
     github.pulls = [{**_pull(10, labels=(), author=ME, hours=60), 'draft': True}]
     github.files[10] = ['team/decisions/new-decision.md']
     _collect(store, knowledge, github, review='all')
-    pr = _queue(store)[f'review:pr:{REPO}#10']
+    pr = _queue(store)[_key(f'pr:{REPO}#10')]
     assert pr['draft'] is True and pr['title'].startswith('Review draft records PR #10')
     assert pr['age_hours'] == 60.0
     assert pr['due_at'] == (NOW - timedelta(hours=12)).isoformat()
@@ -269,7 +277,7 @@ def test_draft_prs_that_change_records_are_listed_with_the_clock_from_created_at
     github.pulls = [_pull(10, labels=(), author=ME, hours=60)]  # same created_at
     store.clock['now'] = NOW + timedelta(hours=1)
     _collect(store, knowledge, github, review='all')
-    ready = _queue(store)[f'review:pr:{REPO}#10']
+    ready = _queue(store)[_key(f'pr:{REPO}#10')]
     assert ready['id'] == pr['id'] and ready['draft'] is False and ready['due_at'] == pr['due_at']
 
 
@@ -280,7 +288,7 @@ def test_assigned_mode_counts_requested_teams_i_belong_to(store, knowledge):
                     {**_pull(12, author='teammate'), 'requested_teams': [team('other-team')]},
                     {**_pull(13, author='teammate'), 'requested_teams': [team('knowledge-reviewers')]}]
     _collect(store, knowledge, github, review='assigned')
-    assert sorted(k for k in _queue(store) if k.startswith('review:pr:')) == [f'review:pr:{REPO}#{n}' for n in (11, 13)]
+    assert sorted(k for k in _queue(store) if k.startswith(SOURCE + 'pr:')) == [_key(f'pr:{REPO}#{n}') for n in (11, 13)]
     membership = [c for c in github.calls if c.startswith('orgs/')]
     assert membership == ['orgs/example-org/teams/knowledge-reviewers/memberships/reviewer-me',
                           'orgs/example-org/teams/other-team/memberships/reviewer-me']  # cached per team
@@ -290,8 +298,8 @@ def test_team_repo_adds_my_own_and_batch_bot_prs_to_assigned_ones(store, knowled
     github = FakeGitHub()
     github.pulls += [_pull(5, author='Reviewer-Me'), _pull(6, author='records-bot'), _pull(7, author='teammate')]
     _collect(store, knowledge, github, review='assigned', batch_authors=('@records-bot',))
-    prs = sorted(k for k in _queue(store) if k.startswith('review:pr:'))
-    assert prs == [f'review:pr:{REPO}#{n}' for n in (1, 2, 5, 6)]
+    prs = sorted(k for k in _queue(store) if k.startswith(SOURCE + 'pr:'))
+    assert prs == [_key(f'pr:{REPO}#{n}') for n in (1, 2, 5, 6)]
     with pytest.raises(ValueError):
         _collect(store, knowledge, github, review='everything')
 
@@ -330,7 +338,7 @@ def test_unlabelled_pr_that_changes_records_counts_as_a_records_pr(store, knowle
     github.pulls = [_pull(8, labels=(), author=ME, hours=3), _pull(9, labels=(), author=ME)]
     github.files[9] = ['README.md', '.github/workflows/check.yml']
     _collect(store, knowledge, github, review='all')
-    assert sorted(k for k in _queue(store) if k.startswith('review:pr:')) == [f'review:pr:{REPO}#8']
+    assert sorted(k for k in _queue(store) if k.startswith(SOURCE + 'pr:')) == [_key(f'pr:{REPO}#8')]
 
 
 def test_gh_reader_maps_404_to_lookup_error():
@@ -354,7 +362,7 @@ def test_team_membership_403_skips_that_team_with_one_warning(store, knowledge, 
     with caplog.at_level('WARNING', logger='work_copilot.review_queue'):
         result = _collect(store, knowledge, github, review='assigned')
     assert result['open'] == 3  # PR 11 via the team I am in, plus the overdue record and the old Source
-    assert [k for k in _queue(store) if k.startswith('review:pr:')] == [f'review:pr:{REPO}#11']
+    assert [k for k in _queue(store) if k.startswith(SOURCE + 'pr:')] == [_key(f'pr:{REPO}#11')]
     assert [r.levelname for r in caplog.records] == ['WARNING']
 
 

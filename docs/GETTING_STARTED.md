@@ -45,6 +45,10 @@ Demo state defaults to `~/.local/share/work-copilot-demo`; real state uses the s
 
 Choose an existing, approved **work-only Markdown folder**. Capture is recursive; do not select your whole personal vault. Choose your own IANA timezone; UTC is the default.
 
+The first capture writes one small file, `.work-copilot-vault.json`, in the folder's root. It names the folder, so a moved or re-synced folder keeps every note and its evidence links. Keep the file when you move the folder.
+
+To capture a copy as a second vault, delete that file in the copy first; two folders with the same id are refused. Notes captured before the file existed are renamed to it once, with the ids in Inbox note headers. If you moved the folder before upgrading, run `capture <vault> --moved-from <old folder>` once.
+
 ```sh
 ./run.sh --timezone America/New_York --data-dir /absolute/private/copilot serve --vault /absolute/work-vault
 ```
@@ -97,6 +101,16 @@ Ask the client to list projects, retrieve one source passage, then track a ficti
 
 Doctor inspects local readiness; it does not authorize or contact a server. It also reports whether Claude Code has a `work-copilot` server registered (user scope, or local scope and `.mcp.json` for the project's git root, else the current directory; and whether it uses the same data directory), whether the vault sits in OneDrive, iCloud, Dropbox or Google Drive (company notes copied into personal sync) or under a symlink, whether a company overlay is applied, and whether a team `rules.json` beside the database is valid (the dashboard and MCP server refuse to start on a bad one). Each reports `ok`, `warning` or `error`, with a `fix` when not ok; it only reads files. The company overlay names the work site, knowledge space, Jira project and review room this install serves. team-harness renders it from the company's org overlay (`python3 scripts/work_copilot_overlay.py --harness <name> --out /absolute/work-copilot-overlay.json`, `py -3` on Windows; its `install_local.py` prints the same commands). Apply it with this launcher, which changes to its own directory, so give the file's absolute path: `./run.sh --data-dir /absolute/private/copilot overlay apply /absolute/work-copilot-overlay.json` (on Windows, `.\run.ps1` with the same arguments). That checks it and records it as `overlay.json` in the data directory, and `overlay show` prints it. It holds places, never credentials, and applying it contacts nothing. A placeholder overlay (the public example) is reported as a warning. For an approved Symphony OAuth MCP endpoint, follow [Symphony MCP setup](SYMPHONY_MCP.md). Endpoint tools, scopes and response schema must be verified against your actual server. No vendor-specific Jira/GitHub/Confluence integration or live company-server test is implied by the fictional demo or smoke result.
 
+### Upgrades, backups and moving your data
+
+The database records its schema version. When a new Work Copilot changes the schema, the first start migrates it in ordered steps, after copying the old database to `backups/` in your data folder. A database from a newer Work Copilot is refused, not opened. `doctor` shows the schema version and the backups.
+
+A backup holds captured text, so the five newest are kept and any older than 30 days is deleted on the next start. Text that expires or that you `forget` is cleared inside each backup too.
+
+Search and project links are kept current as records arrive, so a normal start does not rebuild them. If search ever looks wrong, `doctor --repair` rebuilds them from the recorded state; it changes nothing else.
+
+To back up or move everything, `work-copilot --data-dir <dir> export --jsonl state.jsonl` writes all local state to one JSONL file. `work-copilot --data-dir <new empty dir> import --jsonl state.jsonl` restores it; import never merges into or overwrites an existing database. The file holds your captured work text, so keep it in the same approved storage as the data folder.
+
 ### Common first-run issues
 
 - **Python/venv missing:** install Python 3.11+ through your normal approved process. Some Linux distributions package venv separately. No global installation is performed by Work Copilot.
@@ -107,4 +121,4 @@ Doctor inspects local readiness; it does not authorize or contact a server. It a
 - **Vault rejected:** symlinked roots/paths are not supported. Select an actual work-only folder; do not broaden filesystem permissions blindly.
 - **Smoke fails:** keep its failing phase and error when reporting the problem. The synthetic check contains no work payload; review any additional logs before sharing. A successful smoke is not proof of live connector or actual-client compatibility.
 
-The app does not encrypt your SQLite/Markdown files, supply backups, enforce live enterprise ACLs, or stay awake when the laptop sleeps. Use approved local storage and keep private state out of Git. Nothing in these steps deploys a cloud service or installs a startup agent.
+The app does not encrypt your SQLite/Markdown files or its backups, schedule backups, enforce live enterprise ACLs, or stay awake when the laptop sleeps. Use approved local storage and keep private state out of Git. Nothing in these steps deploys a cloud service or installs a startup agent.

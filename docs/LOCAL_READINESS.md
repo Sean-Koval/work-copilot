@@ -10,7 +10,7 @@ The [validation record](VALIDATION.md) preserves the original **79-test MVP run*
 
 | Area | Evidence recorded | What it does not establish |
 | --- | --- | --- |
-| Store and reconciliation | Restart/replay, source revisions, mapping, intent deduplication, stale drafts, review conflicts, timezone-aware views, lexical search | Complete understanding of arbitrary work prose |
+| Store and reconciliation | Restart/replay, source revisions, mapping, intent deduplication by `provider:site:object` source ids and `<source id>:<ask kind>` intent keys (others refused on ingest), stale drafts, review conflicts, timezone-aware views, lexical search | Complete understanding of arbitrary work prose |
 | Selected vault | Original preservation, edits/deletions/restores, alias suggestions, safe paths and concurrent capture/export | Every OS/filesystem behavior, enterprise retention or backup |
 | Local HTTP | Host/origin/token boundaries, onboarding/capture/search/tracking smoke paths | Successful visual rendering or browser click-through |
 | Local MCP | Actual official SDK stdio client/server initialization and tool operations, restart recall | A successful Claude/Antigravity/model conversation |

@@ -13,7 +13,7 @@ schema_version: 1
 revision: "3"
 provider: "symphony"
 observed_at: "2026-11-06T10:12:00+00:00"
-obligations: [{"intent_key": "rename-tickets", "title": "Rename open tickets", "status": "candidate"}]
+obligations: [{"intent_key": "symphony:tenant:thread:42:rename-tickets", "title": "Rename open tickets", "status": "candidate"}]
 description: "Agreed: ticket titles start with the repository name and a colon."
 url: "https://chat.example.invalid/rooms/team/threads/42"
 ---

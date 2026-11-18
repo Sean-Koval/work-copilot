@@ -1,4 +1,4 @@
-from work_copilot.doctor import diagnose
+from work_copilot.doctor import diagnose, diagnose_path
 from work_copilot.store import Store
 
 
@@ -265,3 +265,14 @@ def test_doctor_rules_check(tmp_path):
     assert bad['state']=='invalid' and not bad['ok'] and 'rules.json' in bad['path']
     (tmp_path/'rules.json').write_text('[]',encoding='utf-8')
     assert rules_check(tmp_path)['state']=='invalid'
+
+
+def test_doctor_reports_schema_version(tmp_path):
+    import sqlite3
+    from work_copilot.schema import SCHEMA_VERSION
+    Store(tmp_path/'copilot.db').close()
+    database=diagnose_path(tmp_path)['checks']['database']
+    assert database['ok'] and database['schema_version']==SCHEMA_VERSION==database['supported_schema_version']
+    db=sqlite3.connect(tmp_path/'copilot.db'); db.execute(f'PRAGMA user_version={SCHEMA_VERSION+1}'); db.commit(); db.close()
+    database=diagnose_path(tmp_path)['checks']['database']
+    assert database['ok'] is False and database['status']=='newer_schema'
