@@ -60,7 +60,7 @@ def _run():
     parser.add_argument('--timezone',default=os.environ.get('WORK_COPILOT_TIMEZONE','UTC'),help='IANA timezone for Today/follow-ups; default UTC')
     parser.add_argument('--data-dir',type=Path,help='Private state directory (never a public repository)')
     sub=parser.add_subparsers(dest='command',required=True)
-    for name in ['init','demo','serve','capture','export','import','mcp','connect','collect','doctor','activity','drain-activity','smoke','review-queue']:
+    for name in ['init','demo','serve','capture','export','import','mcp','connect','collect','doctor','activity','drain-activity','smoke','review-queue','forget']:
         p=sub.add_parser(name)
         if name=='activity':
             p.add_argument('--file',type=Path,required=True,help='Structured local session event JSON; no trace scraping')
@@ -71,6 +71,7 @@ def _run():
         elif name=='doctor':
             p.add_argument('--vault',type=Path)
             p.add_argument('--config',type=Path)
+            p.add_argument('--repair',action='store_true',help='Rebuild search and project links from recorded state, then diagnose')
         elif name in {'serve','demo'}:
             p.add_argument('--connector-config',type=Path,help='Explicit configured OAuth MCP collector; never opens OAuth automatically')
             p.add_argument('--port',type=int,default=8765)
@@ -79,8 +80,10 @@ def _run():
             _review_options(p)
         elif name=='capture':
             p.add_argument('vault',type=Path)
+            p.add_argument('--moved-from',type=Path,help='The folder this vault was in before it moved, if it moved before it had a .work-copilot-vault.json (renames its notes once)')
         elif name=='export':
-            p.add_argument('vault',type=Path,nargs='?',help='Regenerate the project wiki in this vault (omit with --to)')
+            p.add_argument('vault',type=Path,nargs='?',help='Regenerate the project wiki in this vault (omit with --to or --jsonl)')
+            p.add_argument('--jsonl',type=Path,help='Write all local state to this JSONL file (a portable backup; restore with import --jsonl)')
             p.add_argument('--to',type=Path,default=os.environ.get('WORK_COPILOT_KNOWLEDGE_REPO'),help='Local knowledge repository; Source records go to its inbox/. Default: WORK_COPILOT_KNOWLEDGE_REPO')
             p.add_argument('--since',help='Export sources observed at or after this ISO timestamp with timezone')
             p.add_argument('--owner',default=os.environ.get('WORK_COPILOT_KNOWLEDGE_OWNER'),help='Record owner. Default: WORK_COPILOT_KNOWLEDGE_OWNER')
@@ -89,7 +92,10 @@ def _run():
             p.add_argument('--repo',type=Path,default=os.environ.get('WORK_COPILOT_KNOWLEDGE_REPO'),help='Local clone of the knowledge repository (read only). Default: WORK_COPILOT_KNOWLEDGE_REPO')
             _review_options(p)
         elif name=='import':
-            p.add_argument('file',type=Path,help='Normalized JSON envelope or source array')
+            p.add_argument('file',type=Path,nargs='?',help='Normalized JSON envelope or source array')
+            p.add_argument('--jsonl',type=Path,help='Restore a JSONL export into an empty --data-dir')
+        elif name=='forget':
+            p.add_argument('--source',required=True,help='Id of the source whose text to remove from the database and backups/ (not from exports or the wiki)')
         elif name in {'connect','collect'}:
             p.add_argument('--config',type=Path,required=True)
             p.add_argument('--authorize',action='store_true',help='Explicitly initiate OAuth in browser; only approved company server')
@@ -108,7 +114,7 @@ def _run():
         parser.error('Unknown IANA timezone')
     os.environ['WORK_COPILOT_TIMEZONE']=args.timezone
     data=(args.data_dir or default_data_dir(args.command=='demo')).expanduser().resolve()
-    if args.command=='doctor':
+    if args.command=='doctor' and not args.repair:
         from .doctor import diagnose_path
         report=diagnose_path(data,vault=args.vault,config=args.config,timezone_name=args.timezone)
         if args.data_dir is None and (note:=legacy_data_note(data)):
@@ -123,7 +129,7 @@ def _run():
         if args.file.stat().st_size>MAX_EVENT_BYTES:
             parser.error('Activity file exceeds 64 KiB')
         try:
-            print(json.dumps(enqueue_activity(data,json.loads(args.file.read_text(encoding='utf-8'))),indent=2))
+            print(json.dumps(enqueue_activity(data,json.loads(args.file.read_text(encoding='utf-8')),os.environ),indent=2))
         except (ValueError,OSError) as exc:
             parser.error(str(exc))
         return
@@ -151,29 +157,47 @@ def _run():
         uvicorn.run(create_app(data,demo=args.command=='demo',vault=args.vault,connector_config=args.connector_config,review_queue=review_settings),host='127.0.0.1',port=args.port)
         return
     from .store import Store
+    if args.command=='import' and (args.jsonl is None)==(args.file is None):
+        parser.error('import takes exactly one of: a source file, or --jsonl <export>')
+    if args.command=='export' and args.jsonl and args.vault:
+        parser.error('export --jsonl writes local state only; omit the vault')
+    if args.command=='import' and args.jsonl:
+        try:
+            store,result=Store.import_jsonl(args.jsonl,data/'copilot.db')
+            store.close()
+        except (ValueError,OSError) as exc:
+            print(f'Error: {exc}',file=sys.stderr)
+            raise SystemExit(1)
+        print(json.dumps(result,indent=2,default=str))
+        return
     store=Store(data/'copilot.db')
     try:
         if args.command=='activity':
             from .hooks import enqueue_activity, ingest_activity
             event=json.loads(args.file.read_text(encoding='utf-8'))
             if args.queue_only:
-                result=enqueue_activity(data,event)
+                result=enqueue_activity(data,event,os.environ)
             else:
                 config=json.loads(args.config.read_text(encoding='utf-8')) if args.config else None
-                result=ingest_activity(store,event,config)
+                result=ingest_activity(store,event,config,os.environ)
         elif args.command=='drain-activity':
             from .hooks import drain_activity
             config=json.loads(args.config.read_text(encoding='utf-8')) if args.config else None
             result=drain_activity(store,data,config)
         elif args.command=='doctor':
             from .doctor import diagnose
+            repaired=store.rebuild_projections() if args.repair else None
             result=diagnose(store,data,vault=args.vault,config=args.config)
+            if repaired is not None:
+                result['repaired']=repaired
         elif args.command=='init':
             result={'data_dir':str(data),'external_sends':False}
         elif args.command=='capture':
             from .vault import capture_vault, export_projects
-            result=capture_vault(store,args.vault)
+            result=capture_vault(store,args.vault,moved_from=args.moved_from)
             result['export']=export_projects(store,args.vault)
+        elif args.command=='export' and args.jsonl:
+            result=store.export_jsonl(args.jsonl)
         elif args.command=='export' and args.vault is None:
             if args.to is None:
                 raise ValueError('Give a vault for the project wiki, or --to <knowledge repo> for Source records')
@@ -191,6 +215,8 @@ def _run():
             payload=json.loads(args.file.read_text(encoding='utf-8'))
             items=payload if isinstance(payload,list) else payload['items']
             result=store.ingest(items,connector='import',checkpoint=payload.get('checkpoint') if isinstance(payload,dict) else None)
+        elif args.command=='forget':
+            result=store.forget(args.source)
         elif args.command in {'connect','collect'}:
             from .remote_mcp import remote_discover, remote_collect
             fn=remote_discover if args.command=='connect' else remote_collect
